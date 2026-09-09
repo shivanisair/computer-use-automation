@@ -5,6 +5,7 @@ from playwright.sync_api import sync_playwright
 from app.agent import ActionType, AgentAction, decide_action
 from app.artifact import CapabilityArtifact, SemanticTarget
 from app.guardrails import Guardrails
+from app.logger import RunLogger
 from app.surface import Observation, PlaywrightSurface
 
 
@@ -41,6 +42,8 @@ def execute_action(
     surface: PlaywrightSurface,
     guardrails: Guardrails,
     action: AgentAction,
+    logger: RunLogger | None = None,
+    step_number: int | None = None,
 ):
     target = None
 
@@ -57,6 +60,24 @@ def execute_action(
         surface.page.url,
         target,
     )
+
+
+    if logger is not None:
+        logger.log(
+            "guardrail_decision",
+            step_number=step_number,
+            data={
+                "action": action.action.value,
+                "target_role": (
+                    target.role if target else None
+                ),
+                "target_name": (
+                    target.name if target else None
+                ),
+                "allowed": decision.allowed,
+                "reason": decision.reason,
+            },
+        )
 
     print(
         f"GUARDRAIL: allowed={decision.allowed} "
@@ -185,6 +206,21 @@ def main():
             },
         )
 
+        logger = RunLogger(
+            phase="discovery",
+        )
+
+        logger.log(
+            "run_started",
+            data={
+                "capability_name": artifact.capability_name,
+                "target_url": TARGET_URL,
+                "max_steps": MAX_STEPS,
+            },
+        )
+
+        print(f"Run log: {logger.path}")
+
         print("\n" + "=" * 70)
         print("DISCOVERY GOAL")
         print("=" * 70)
@@ -226,6 +262,17 @@ def main():
                 observation=formatted_observation,
             )
 
+            logger.log(
+                "action_selected",
+                step_number=step_number,
+                data={
+                    "action": action.action.value,
+                    "target_id": action.target_id,
+                    "output_name": action.output_name,
+                    "reason": action.reason,
+                },
+            )
+
             print("\nLLM DECISION")
             print("-" * 70)
             print(action)
@@ -265,12 +312,32 @@ def main():
 
             try:
                 extracted_value = execute_action(
-                    surface=surface,
-                    guardrails=guardrails,
-                    action=action,
+                surface=surface,
+                guardrails=guardrails,
+                action=action,
+                logger=logger,
+                step_number=step_number,
+                )
+
+                logger.log(
+                    "action_succeeded",
+                    step_number=step_number,
+                    data={
+                        "action": action.action.value,
+                    },
                 )
 
             except Exception as error:
+                logger.log(
+                    "action_failed",
+                    step_number=step_number,
+                    data={
+                        "action": action.action.value,
+                        "error_type": type(error).__name__,
+                        "error": str(error),
+                    },
+                )
+
                 print(
                     f"\nACTION FAILED: {error}"
                 )
