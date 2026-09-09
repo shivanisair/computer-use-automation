@@ -11,6 +11,7 @@ class UIElement:
     role: str
     name: str
     element_type: str | None = None
+    value: str | None = None
 
 
 @dataclass
@@ -22,22 +23,11 @@ class Observation:
 
 
 class PlaywrightSurface:
-    """
-    Browser-backed surface adapter used by discovery and replay.
-
-    Discovery may use temporary numeric element IDs.
-    Replay can resolve controls deterministically using semantic
-    role/name information.
-    """
-
     def __init__(self, page: Page):
         self.page = page
         self._elements: dict[int, Any] = {}
 
     def observe(self) -> Observation:
-        """
-        Capture the current page state and visible interactive controls.
-        """
         self._elements.clear()
 
         raw_elements = self.page.locator(
@@ -58,39 +48,45 @@ class PlaywrightSurface:
                     "(el) => el.tagName.toLowerCase()"
                 )
 
-                element_type = locator.get_attribute(
-                    "type"
+                element_type = locator.get_attribute("type")
+
+                role = self._infer_role(
+                    tag,
+                    element_type,
                 )
+
+                name = self._get_accessible_name(locator)
+
+                current_value = None
+
+                if role in {"textbox", "combobox"}:
+                    try:
+                        current_value = locator.input_value()
+                    except Exception:
+                        current_value = None
 
                 element = UIElement(
                     id=next_id,
                     tag=tag,
-                    role=self._infer_role(
-                        tag,
-                        element_type,
-                    ),
-                    name=self._get_accessible_name(
-                        locator
-                    ),
+                    role=role,
+                    name=name,
                     element_type=element_type,
+                    value=current_value,
                 )
 
                 elements.append(element)
-
                 self._elements[next_id] = locator
-
                 next_id += 1
 
-            except Exception:
-                # Dynamic pages may detach controls while
-                # an observation is being collected.
-                continue
+            except Exception as error:
+                print(
+                    f"Skipping interactive element "
+                    f"{index}: {error}"
+                )
 
         body_text = self.page.locator(
             "body"
-        ).inner_text()
-
-        body_text = body_text[:5000]
+        ).inner_text()[:5000]
 
         return Observation(
             url=self.page.url,
@@ -103,10 +99,6 @@ class PlaywrightSurface:
         self,
         element_id: int,
     ) -> UIElement:
-        """
-        Return semantic metadata for an element from
-        the current observation.
-        """
         observation = self.observe()
 
         for element in observation.elements:
@@ -114,8 +106,8 @@ class PlaywrightSurface:
                 return element
 
         raise ValueError(
-            f"Element {element_id} does not exist "
-            "in the current observation."
+            f"Element ID {element_id} "
+            "was not found in the current observation."
         )
 
     def resolve_semantic_target(
@@ -123,13 +115,6 @@ class PlaywrightSurface:
         role: str,
         name: str,
     ):
-        """
-        Deterministically resolve a visible control using
-        semantic role and accessible name.
-
-        Replay must get exactly one match. Ambiguous or missing
-        targets fail rather than guessing.
-        """
         observation = self.observe()
 
         matches = [
@@ -160,7 +145,7 @@ class PlaywrightSurface:
         self,
         element_id: int,
         value: str,
-    ) -> None:
+    ):
         locator = self._resolve_element(
             element_id
         )
@@ -169,7 +154,7 @@ class PlaywrightSurface:
     def click(
         self,
         element_id: int,
-    ) -> None:
+    ):
         locator = self._resolve_element(
             element_id
         )
@@ -179,7 +164,7 @@ class PlaywrightSurface:
         self,
         element_id: int,
         value: str,
-    ) -> None:
+    ):
         locator = self._resolve_element(
             element_id
         )
@@ -194,15 +179,15 @@ class PlaywrightSurface:
         )
 
         try:
-            return locator.inner_text().strip()
+            return locator.input_value()
         except Exception:
-            return locator.input_value().strip()
+            return locator.inner_text()
 
     def click_semantic(
         self,
         role: str,
         name: str,
-    ) -> None:
+    ):
         locator = self.resolve_semantic_target(
             role,
             name,
@@ -214,7 +199,7 @@ class PlaywrightSurface:
         role: str,
         name: str,
         value: str,
-    ) -> None:
+    ):
         locator = self.resolve_semantic_target(
             role,
             name,
@@ -226,7 +211,7 @@ class PlaywrightSurface:
         role: str,
         name: str,
         value: str,
-    ) -> None:
+    ):
         locator = self.resolve_semantic_target(
             role,
             name,
@@ -244,18 +229,14 @@ class PlaywrightSurface:
         )
 
         try:
-            return locator.inner_text().strip()
+            return locator.input_value()
         except Exception:
-            return locator.input_value().strip()
+            return locator.inner_text()
 
     def _get_accessible_name(
         self,
         locator,
     ) -> str:
-        """
-        Resolve a compact human-readable name for
-        an interactive control.
-        """
         aria_label = locator.get_attribute(
             "aria-label"
         )
@@ -271,31 +252,27 @@ class PlaywrightSurface:
             return placeholder.strip()
 
         try:
-            text = locator.inner_text().strip()
+            inner_text = locator.inner_text().strip()
+            if inner_text:
+                return inner_text
         except Exception:
-            text = ""
-
-        if text:
-            return text
-
-        value = locator.get_attribute(
-            "value"
-        )
+            pass
 
         element_type = locator.get_attribute(
             "type"
         )
 
-        if (
-            value
-            and element_type
-            in {"submit", "button"}
-        ):
-            return value.strip()
+        if element_type in {
+            "submit",
+            "button",
+        }:
+            value = locator.get_attribute(
+                "value"
+            )
+            if value:
+                return value.strip()
 
-        name = locator.get_attribute(
-            "name"
-        )
+        name = locator.get_attribute("name")
 
         if name:
             return name.strip()
@@ -307,10 +284,6 @@ class PlaywrightSurface:
         tag: str,
         element_type: str | None,
     ) -> str:
-        """
-        Map HTML controls to a small surface-neutral
-        role vocabulary.
-        """
         if tag == "a":
             return "link"
 
@@ -338,23 +311,19 @@ class PlaywrightSurface:
 
             return "textbox"
 
-        return tag
+        return "unknown"
 
     def _resolve_element(
         self,
         element_id: int,
     ):
-        locator = self._elements.get(
-            element_id
-        )
-
-        if locator is None:
+        if element_id not in self._elements:
             raise ValueError(
-                f"Element {element_id} does not "
-                "exist in the current observation."
+                f"Element ID {element_id} "
+                "is not available in the current observation."
             )
 
-        return locator
+        return self._elements[element_id]
 
     @staticmethod
     def format_observation(
@@ -368,11 +337,19 @@ class PlaywrightSurface:
         ]
 
         for element in observation.elements:
-            lines.append(
-                f'[{element.id}] {element.role} '
+            line = (
+                f"[{element.id}] "
+                f"{element.role} "
                 f'name="{element.name}" '
                 f'tag="{element.tag}"'
             )
+
+            if element.value is not None:
+                line += (
+                    f' value="{element.value}"'
+                )
+
+            lines.append(line)
 
         lines.extend(
             [

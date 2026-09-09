@@ -123,12 +123,15 @@ def main():
     )
 
     goal = (
-        "Navigate to the Contact Us page. "
-        "Complete when the Contact Us page has been reached."
-    )
+    "Navigate to the Contact Us page and fill out the Customer Care form "
+    "using Name 'Demo User', Email 'demo@example.com', Phone '555-0100', "
+    "and Message 'Automated test message'. "
+    "Do not submit the form. "
+    "Complete when all four fields have been filled."
+)
 
     artifact = CapabilityArtifact(
-        capability_name="navigate_to_contact_us",
+        capability_name="fill_customer_care_form",
         goal=goal,
         target_domain="parabank.parasoft.com",
     )
@@ -277,7 +280,7 @@ def main():
         if completed:
             artifact_path = (
                 artifact_dir
-                / "navigate_to_contact_us.json"
+                / "fill_customer_care_form.json"
             )
 
             artifact.save(

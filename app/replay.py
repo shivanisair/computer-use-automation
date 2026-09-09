@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from playwright.sync_api import sync_playwright
+from urllib.parse import urlparse
 
 from app.agent import ActionType
 from app.artifact import CapabilityArtifact, SemanticTarget
@@ -15,7 +16,7 @@ from app.surface import PlaywrightSurface
 
 
 ARTIFACT_PATH = Path(
-    "evidence/artifacts/navigate_to_contact_us.json"
+    "evidence/artifacts/fill_customer_care_form.json"
 )
 
 TARGET_URL = (
@@ -148,6 +149,15 @@ def load_artifact() -> CapabilityArtifact:
 
     return artifact
 
+def normalize_url(url: str) -> tuple[str, str]:
+    parsed = urlparse(url)
+
+    path = parsed.path
+
+    if ";jsessionid=" in path:
+        path = path.split(";jsessionid=", 1)[0]
+
+    return parsed.hostname or "", path
 
 def main():
     print("=" * 70)
@@ -231,11 +241,15 @@ def main():
 
             current_url = page.url
 
-            if current_url != step.url_before:
+            if normalize_url(current_url) != normalize_url(
+                step.url_before
+            ):
                 error = RecoverableAutomationError(
                     "Replay URL precondition changed. "
-                    f"Expected {step.url_before}, "
-                    f"but found {current_url}."
+                    f"Expected route "
+                    f"{normalize_url(step.url_before)}, "
+                    f"but found "
+                    f"{normalize_url(current_url)}."
                 )
 
                 handoff = create_handoff(
