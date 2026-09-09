@@ -1,0 +1,26 @@
+{
+  "version": "1.1",
+  "capability_name": "navigate_to_contact_us",
+  "goal": "Navigate to the Contact Us page. Complete when the Contact Us page has been reached.",
+  "target_domain": "parabank.parasoft.com",
+  "created_at": "2026-09-09T17:33:18.974541Z",
+  "steps": [
+    {
+      "step_number": 1,
+      "url_before": "https://parabank.parasoft.com/parabank/index.htm",
+      "action": {
+        "action": "click",
+        "target_id": 33,
+        "value": null,
+        "output_name": null,
+        "reason": "The Contact Us link is visible and clicking it should navigate to the Contact Us page."
+      },
+      "target": {
+        "role": "link",
+        "name": "Contact Us"
+      },
+      "extracted_value": null
+    }
+  ],
+  "outputs": {}
+}

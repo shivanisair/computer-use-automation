@@ -3,11 +3,38 @@ from pathlib import Path
 from playwright.sync_api import sync_playwright
 
 from app.agent import ActionType, AgentAction, decide_action
+from app.artifact import CapabilityArtifact, SemanticTarget
 from app.guardrails import Guardrails
-from app.surface import PlaywrightSurface
+from app.surface import Observation, PlaywrightSurface
 
 
 TARGET_URL = "https://parabank.parasoft.com/parabank/index.htm"
+MAX_STEPS = 8
+
+
+def get_semantic_target(
+    observation: Observation,
+    action: AgentAction,
+) -> SemanticTarget | None:
+    """
+    Convert the temporary element ID selected by the discovery
+    agent into stable semantic target information.
+    """
+
+    if action.target_id is None:
+        return None
+
+    for element in observation.elements:
+        if element.id == action.target_id:
+            return SemanticTarget(
+                role=element.role,
+                name=element.name,
+            )
+
+    raise ValueError(
+        f"Agent selected element {action.target_id}, "
+        "but it does not exist in the current observation."
+    )
 
 
 def execute_action(
@@ -15,9 +42,6 @@ def execute_action(
     guardrails: Guardrails,
     action: AgentAction,
 ):
-    """
-    Check an agent action against policy before executing it.
-    """
     decision = guardrails.check(
         action,
         surface.page.url,
@@ -33,46 +57,81 @@ def execute_action(
 
     if action.action == ActionType.FILL:
         if action.target_id is None or action.value is None:
-            raise ValueError("FILL requires target_id and value.")
+            raise ValueError(
+                "FILL requires target_id and value."
+            )
 
-        surface.fill(action.target_id, action.value)
+        surface.fill(
+            action.target_id,
+            action.value,
+        )
 
     elif action.action == ActionType.CLICK:
         if action.target_id is None:
-            raise ValueError("CLICK requires target_id.")
+            raise ValueError(
+                "CLICK requires target_id."
+            )
 
         surface.click(action.target_id)
 
     elif action.action == ActionType.SELECT:
         if action.target_id is None or action.value is None:
-            raise ValueError("SELECT requires target_id and value.")
+            raise ValueError(
+                "SELECT requires target_id and value."
+            )
 
-        surface.select_option(action.target_id, action.value)
+        surface.select_option(
+            action.target_id,
+            action.value,
+        )
 
     elif action.action == ActionType.EXTRACT:
         if action.target_id is None:
-            raise ValueError("EXTRACT requires target_id.")
+            raise ValueError(
+                "EXTRACT requires target_id."
+            )
 
-        return surface.extract_text(action.target_id)
+        return surface.extract_text(
+            action.target_id
+        )
 
     elif action.action == ActionType.WAIT:
         surface.page.wait_for_timeout(1000)
 
-    elif action.action in {
-        ActionType.COMPLETE,
-        ActionType.ESCALATE,
-    }:
-        return None
-
     else:
         raise ValueError(
-            f"Unsupported action: {action.action}"
+            f"Unsupported discovery action: "
+            f"{action.action}"
         )
+
+    return None
 
 
 def main():
-    evidence_dir = Path("evidence/screenshots")
-    evidence_dir.mkdir(parents=True, exist_ok=True)
+    evidence_dir = Path("evidence")
+    screenshot_dir = evidence_dir / "screenshots"
+    artifact_dir = evidence_dir / "artifacts"
+
+    screenshot_dir.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    artifact_dir.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    goal = (
+        "Navigate to the Contact Us page. "
+        "Complete when the Contact Us page has been reached."
+    )
+
+    artifact = CapabilityArtifact(
+        capability_name="navigate_to_contact_us",
+        goal=goal,
+        target_domain="parabank.parasoft.com",
+    )
 
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(
@@ -94,14 +153,8 @@ def main():
             timeout=30_000,
         )
 
-        # -----------------------------
-        # Surface
-        # -----------------------------
         surface = PlaywrightSurface(page)
 
-        # -----------------------------
-        # Guardrails
-        # -----------------------------
         guardrails = Guardrails(
             allowed_domains={
                 "parabank.parasoft.com"
@@ -115,79 +168,150 @@ def main():
             },
         )
 
-        # -----------------------------
-        # OBSERVE
-        # -----------------------------
-        observation = surface.observe()
-
-        formatted_observation = (
-            surface.format_observation(observation)
-        )
-
         print("\n" + "=" * 70)
-        print("AGENT OBSERVATION")
-        print("=" * 70)
-        print(formatted_observation)
-
-        # Save evidence of the initial state.
-        page.screenshot(
-            path=evidence_dir / "parabank_home.png"
-        )
-
-        # -----------------------------
-        # GOAL
-        # -----------------------------
-        goal = "Click the Contact Us link."
-
-        print("\n" + "=" * 70)
-        print("GOAL")
+        print("DISCOVERY GOAL")
         print("=" * 70)
         print(goal)
 
-        # -----------------------------
-        # DECIDE — LLM
-        # -----------------------------
-        action = decide_action(
-            goal=goal,
-            observation=formatted_observation,
-        )
+        completed = False
 
-        print("\n" + "=" * 70)
-        print("LLM DECISION")
-        print("=" * 70)
-        print(action)
-
-        # -----------------------------
-        # GUARDRAIL + ACT
-        # -----------------------------
-        execute_action(
-            surface=surface,
-            guardrails=guardrails,
-            action=action,
-        )
-
-        print("\nAction executed successfully.")
-
-        # -----------------------------
-        # OBSERVE AGAIN
-        # -----------------------------
-        new_observation = surface.observe()
-
-        print("\n" + "=" * 70)
-        print("OBSERVATION AFTER ACTION")
-        print("=" * 70)
-        print(
-            surface.format_observation(
-                new_observation
+        for step_number in range(
+            1,
+            MAX_STEPS + 1,
+        ):
+            print("\n" + "=" * 70)
+            print(
+                f"DISCOVERY STEP {step_number}"
             )
-        )
+            print("=" * 70)
 
-        # Save evidence after the LLM action.
-        page.screenshot(
-            path=evidence_dir / "after_llm_action.png"
-        )
+            observation = surface.observe()
 
-        input("\nPress Enter to close browser...")
+            formatted_observation = (
+                surface.format_observation(
+                    observation
+                )
+            )
+
+            print("\nOBSERVATION")
+            print("-" * 70)
+            print(formatted_observation)
+
+            page.screenshot(
+                path=(
+                    screenshot_dir
+                    / f"discovery_step_{step_number}.png"
+                )
+            )
+
+            action = decide_action(
+                goal=goal,
+                observation=formatted_observation,
+            )
+
+            print("\nLLM DECISION")
+            print("-" * 70)
+            print(action)
+
+            if action.action == ActionType.COMPLETE:
+                print(
+                    "\nAgent reports that the goal "
+                    "has been completed."
+                )
+                completed = True
+                break
+
+            if action.action == ActionType.ESCALATE:
+                print(
+                    "\nAgent requested human escalation."
+                )
+                break
+
+            # Resolve the temporary numeric ID into semantic
+            # information BEFORE changing the page.
+            semantic_target = get_semantic_target(
+                observation=observation,
+                action=action,
+            )
+
+            if semantic_target is not None:
+                print(
+                    "\nSEMANTIC TARGET"
+                )
+                print("-" * 70)
+                print(
+                    f"role={semantic_target.role!r} "
+                    f"name={semantic_target.name!r}"
+                )
+
+            url_before = page.url
+
+            try:
+                extracted_value = execute_action(
+                    surface=surface,
+                    guardrails=guardrails,
+                    action=action,
+                )
+
+            except Exception as error:
+                print(
+                    f"\nACTION FAILED: {error}"
+                )
+                break
+
+            artifact.add_step(
+                step_number=step_number,
+                url_before=url_before,
+                action=action,
+                target=semantic_target,
+                extracted_value=extracted_value,
+            )
+
+            print(
+                "\nAction executed and "
+                "recorded successfully."
+            )
+
+            page.wait_for_timeout(500)
+
+        if completed:
+            artifact_path = (
+                artifact_dir
+                / "navigate_to_contact_us.json"
+            )
+
+            artifact.save(
+                str(artifact_path)
+            )
+
+            print("\n" + "=" * 70)
+            print("DISCOVERY COMPLETE")
+            print("=" * 70)
+
+            print(
+                f"Artifact saved to: "
+                f"{artifact_path}"
+            )
+
+            page.screenshot(
+                path=(
+                    screenshot_dir
+                    / "discovery_complete.png"
+                )
+            )
+
+        else:
+            print("\n" + "=" * 70)
+            print("DISCOVERY DID NOT COMPLETE")
+            print("=" * 70)
+
+            print(
+                "No reusable artifact was saved."
+            )
+
+        input(
+            "\nPress Enter to close browser..."
+        )
 
         browser.close()
 
