@@ -4,6 +4,12 @@ from playwright.sync_api import sync_playwright
 
 from app.agent import ActionType
 from app.artifact import CapabilityArtifact, SemanticTarget
+from app.escalation import (
+    ErrorCategory,
+    HardAutomationFailure,
+    RecoverableAutomationError,
+    create_handoff,
+)
 from app.guardrails import Guardrails
 from app.surface import PlaywrightSurface
 
@@ -24,10 +30,7 @@ def execute_replay_action(
     target: SemanticTarget | None,
 ):
     """
-    Replay a recorded action deterministically.
-
-    Numeric discovery IDs are intentionally not used for
-    element-targeted replay.
+    Replay one recorded action deterministically.
     """
 
     decision = guardrails.check(
@@ -41,14 +44,16 @@ def execute_replay_action(
     )
 
     if not decision.allowed:
-        raise PermissionError(decision.reason)
+        raise HardAutomationFailure(
+            decision.reason
+        )
 
     if action.action == ActionType.WAIT:
         surface.page.wait_for_timeout(1000)
         return None
 
     if target is None:
-        raise ValueError(
+        raise HardAutomationFailure(
             "Recorded action requires a semantic target."
         )
 
@@ -58,54 +63,65 @@ def execute_replay_action(
         f"name={target.name!r}"
     )
 
-    if action.action == ActionType.CLICK:
-        surface.click_semantic(
-            target.role,
-            target.name,
-        )
-
-    elif action.action == ActionType.FILL:
-        if action.value is None:
-            raise ValueError(
-                "Recorded FILL action has no value."
+    try:
+        if action.action == ActionType.CLICK:
+            surface.click_semantic(
+                target.role,
+                target.name,
             )
 
-        surface.fill_semantic(
-            target.role,
-            target.name,
-            action.value,
-        )
+        elif action.action == ActionType.FILL:
+            if action.value is None:
+                raise HardAutomationFailure(
+                    "Recorded FILL action has no value."
+                )
 
-    elif action.action == ActionType.SELECT:
-        if action.value is None:
-            raise ValueError(
-                "Recorded SELECT action has no value."
+            surface.fill_semantic(
+                target.role,
+                target.name,
+                action.value,
             )
 
-        surface.select_semantic(
-            target.role,
-            target.name,
-            action.value,
-        )
+        elif action.action == ActionType.SELECT:
+            if action.value is None:
+                raise HardAutomationFailure(
+                    "Recorded SELECT action has no value."
+                )
 
-    elif action.action == ActionType.EXTRACT:
-        return surface.extract_semantic(
-            target.role,
-            target.name,
-        )
+            surface.select_semantic(
+                target.role,
+                target.name,
+                action.value,
+            )
 
-    else:
-        raise ValueError(
-            f"Unsupported replay action: "
-            f"{action.action}"
-        )
+        elif action.action == ActionType.EXTRACT:
+            return surface.extract_semantic(
+                target.role,
+                target.name,
+            )
+
+        else:
+            raise HardAutomationFailure(
+                f"Unsupported replay action: "
+                f"{action.action}"
+            )
+
+    except HardAutomationFailure:
+        raise
+
+    except ValueError as error:
+        # Missing or ambiguous semantic targets represent
+        # UI drift that may be recoverable by a human.
+        raise RecoverableAutomationError(
+            str(error)
+        ) from error
 
     return None
 
 
 def load_artifact() -> CapabilityArtifact:
     if not ARTIFACT_PATH.exists():
-        raise FileNotFoundError(
+        raise HardAutomationFailure(
             f"Artifact not found: {ARTIFACT_PATH}"
         )
 
@@ -113,14 +129,19 @@ def load_artifact() -> CapabilityArtifact:
         encoding="utf-8"
     )
 
-    artifact = (
-        CapabilityArtifact.model_validate_json(
-            artifact_json
+    try:
+        artifact = (
+            CapabilityArtifact.model_validate_json(
+                artifact_json
+            )
         )
-    )
+    except Exception as error:
+        raise HardAutomationFailure(
+            f"Artifact validation failed: {error}"
+        ) from error
 
     if artifact.version != "1.1":
-        raise ValueError(
+        raise HardAutomationFailure(
             "Unsupported artifact version: "
             f"{artifact.version}"
         )
@@ -133,7 +154,18 @@ def main():
     print("DETERMINISTIC SEMANTIC REPLAY")
     print("=" * 70)
 
-    artifact = load_artifact()
+    try:
+        artifact = load_artifact()
+
+    except HardAutomationFailure as error:
+        handoff = create_handoff(
+            category=error.category,
+            reason=error.reason,
+        )
+
+        print("\nHARD FAILURE")
+        print(handoff.model_dump_json(indent=2))
+        return
 
     print(
         f"Capability: {artifact.capability_name}"
@@ -188,6 +220,8 @@ def main():
 
         surface = PlaywrightSurface(page)
 
+        replay_completed = True
+
         for step in artifact.steps:
             print("\n" + "=" * 70)
             print(
@@ -198,11 +232,30 @@ def main():
             current_url = page.url
 
             if current_url != step.url_before:
-                raise RuntimeError(
-                    "Replay precondition failed.\n"
-                    f"Expected URL: {step.url_before}\n"
-                    f"Current URL:  {current_url}"
+                error = RecoverableAutomationError(
+                    "Replay URL precondition changed. "
+                    f"Expected {step.url_before}, "
+                    f"but found {current_url}."
                 )
+
+                handoff = create_handoff(
+                    category=error.category,
+                    reason=error.reason,
+                    step_number=step.step_number,
+                    current_url=current_url,
+                    last_action=str(step.action),
+                )
+
+                print("\nHUMAN HANDOFF")
+                print("-" * 70)
+                print(
+                    handoff.model_dump_json(
+                        indent=2
+                    )
+                )
+
+                replay_completed = False
+                break
 
             print("\nRECORDED ACTION")
             print("-" * 70)
@@ -212,12 +265,36 @@ def main():
             print("-" * 70)
             print(step.target)
 
-            execute_replay_action(
-                surface=surface,
-                guardrails=guardrails,
-                action=step.action,
-                target=step.target,
-            )
+            try:
+                execute_replay_action(
+                    surface=surface,
+                    guardrails=guardrails,
+                    action=step.action,
+                    target=step.target,
+                )
+
+            except (
+                RecoverableAutomationError,
+                HardAutomationFailure,
+            ) as error:
+                handoff = create_handoff(
+                    category=error.category,
+                    reason=error.reason,
+                    step_number=step.step_number,
+                    current_url=page.url,
+                    last_action=str(step.action),
+                )
+
+                print("\nHUMAN HANDOFF")
+                print("-" * 70)
+                print(
+                    handoff.model_dump_json(
+                        indent=2
+                    )
+                )
+
+                replay_completed = False
+                break
 
             page.wait_for_timeout(500)
 
@@ -236,19 +313,24 @@ def main():
                 "replayed successfully."
             )
 
-        print("\n" + "=" * 70)
-        print("REPLAY COMPLETE")
-        print("=" * 70)
+        if replay_completed:
+            print("\n" + "=" * 70)
+            print("REPLAY COMPLETE")
+            print("=" * 70)
 
-        print(f"Final title: {page.title()}")
-        print(f"Final URL:   {page.url}")
-
-        page.screenshot(
-            path=(
-                replay_screenshot_dir
-                / "semantic_replay_complete.png"
+            print(
+                f"Final title: {page.title()}"
             )
-        )
+            print(
+                f"Final URL:   {page.url}"
+            )
+
+            page.screenshot(
+                path=(
+                    replay_screenshot_dir
+                    / "semantic_replay_complete.png"
+                )
+            )
 
         input(
             "\nPress Enter to close browser..."
