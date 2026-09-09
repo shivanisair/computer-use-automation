@@ -36,7 +36,7 @@ def execute_replay_action(
 
     decision = guardrails.check(
         action,
-        surface.page.url,
+        surface.page.url, target,
     )
 
     print(
@@ -196,15 +196,16 @@ def main():
     )
 
     guardrails = Guardrails(
-        allowed_domains={
-            artifact.target_domain
-        },
+        allowed_domains={"parabank.parasoft.com"},
         allowed_actions={
-            ActionType.FILL,
             ActionType.CLICK,
+            ActionType.FILL,
             ActionType.SELECT,
             ActionType.EXTRACT,
             ActionType.WAIT,
+        },
+        blocked_targets={
+            ("button", "Send to Customer Care"),
         },
     )
 

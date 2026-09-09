@@ -42,9 +42,20 @@ def execute_action(
     guardrails: Guardrails,
     action: AgentAction,
 ):
+    target = None
+
+    if action.target_id is not None:
+        element = surface.get_element(action.target_id)
+
+        target = SemanticTarget(
+            role=element.role,
+            name=element.name,
+        )
+
     decision = guardrails.check(
         action,
         surface.page.url,
+        target,
     )
 
     print(
@@ -168,6 +179,9 @@ def main():
                 ActionType.SELECT,
                 ActionType.EXTRACT,
                 ActionType.WAIT,
+            },
+            blocked_targets={
+                ("button", "Send to Customer Care"),
             },
         )
 
