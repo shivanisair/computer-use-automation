@@ -4,6 +4,10 @@ from playwright.sync_api import sync_playwright
 
 from app.agent import ActionType, AgentAction, decide_action
 from app.artifact import CapabilityArtifact, SemanticTarget
+from app.escalation import (
+    ErrorCategory,
+    create_handoff,
+)
 from app.guardrails import Guardrails
 from app.logger import RunLogger
 from app.surface import Observation, PlaywrightSurface
@@ -227,6 +231,7 @@ def main():
         print(goal)
 
         completed = False
+        handoff_created = False
 
         for step_number in range(
             1,
@@ -278,6 +283,13 @@ def main():
             print(action)
 
             if action.action == ActionType.COMPLETE:
+                logger.log(
+                    "run_completed",
+                    step_number=step_number,
+                    data={
+                        "reason": action.reason,
+                    },
+                )
                 print(
                     "\nAgent reports that the goal "
                     "has been completed."
@@ -286,9 +298,36 @@ def main():
                 break
 
             if action.action == ActionType.ESCALATE:
-                print(
-                    "\nAgent requested human escalation."
+                handoff = create_handoff(
+                    category=ErrorCategory.RECOVERABLE_ERROR,
+                    reason=action.reason,
+                    step_number=step_number,
+                    current_url=page.url,
+                    last_action=str(action),
                 )
+
+                logger.log(
+                    "human_handoff",
+                    step_number=step_number,
+                    data={
+                        "category": (
+                            ErrorCategory
+                            .RECOVERABLE_ERROR
+                            .value
+                        ),
+                        "reason": action.reason,
+                    },
+                )
+
+                print("\nHUMAN HANDOFF")
+                print("-" * 70)
+                print(
+                    handoff.model_dump_json(
+                        indent=2
+                    )
+                )
+                handoff_created = True
+
                 break
 
             # Resolve the temporary numeric ID into semantic
@@ -328,19 +367,40 @@ def main():
                 )
 
             except Exception as error:
+                category = (
+                    ErrorCategory.HARD_FAILURE
+                    if isinstance(error, PermissionError)
+                    else ErrorCategory.RECOVERABLE_ERROR
+                )
+
                 logger.log(
                     "action_failed",
                     step_number=step_number,
                     data={
                         "action": action.action.value,
                         "error_type": type(error).__name__,
+                        "category": category.value,
                         "error": str(error),
                     },
                 )
 
-                print(
-                    f"\nACTION FAILED: {error}"
+                handoff = create_handoff(
+                    category=category,
+                    reason=str(error),
+                    step_number=step_number,
+                    current_url=page.url,
+                    last_action=str(action),
                 )
+
+                print("\nHUMAN HANDOFF")
+                print("-" * 70)
+                print(
+                    handoff.model_dump_json(
+                        indent=2
+                    )
+                )
+                handoff_created = True
+
                 break
 
             artifact.add_step(
@@ -385,6 +445,42 @@ def main():
             )
 
         else:
+            if not handoff_created:
+                reason = (
+                    f"Discovery reached the maximum "
+                    f"step limit of {MAX_STEPS} "
+                    "without completing the goal."
+                )
+
+                handoff = create_handoff(
+                    category=ErrorCategory.RECOVERABLE_ERROR,
+                    reason=reason,
+                    step_number=MAX_STEPS,
+                    current_url=page.url,
+                    last_action=None,
+                )
+
+                logger.log(
+                    "human_handoff",
+                    step_number=MAX_STEPS,
+                    data={
+                        "category": (
+                            ErrorCategory
+                            .RECOVERABLE_ERROR
+                            .value
+                        ),
+                        "reason": reason,
+                    },
+                )
+
+                print("\nHUMAN HANDOFF")
+                print("-" * 70)
+                print(
+                    handoff.model_dump_json(
+                        indent=2
+                    )
+                )
+
             print("\n" + "=" * 70)
             print("DISCOVERY DID NOT COMPLETE")
             print("=" * 70)
