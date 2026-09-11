@@ -3,7 +3,12 @@ from pathlib import Path
 from playwright.sync_api import sync_playwright
 
 from app.agent import ActionType, AgentAction, decide_action
-from app.artifact import CapabilityArtifact, SemanticTarget
+from app.artifact import (
+    CapabilityArtifact,
+    CheckpointType,
+    SemanticTarget,
+    ValueType,
+)
 from app.escalation import (
     ErrorCategory,
     create_handoff,
@@ -64,7 +69,6 @@ def execute_action(
         surface.page.url,
         target,
     )
-
 
     if logger is not None:
         logger.log(
@@ -142,6 +146,66 @@ def execute_action(
 
     return None
 
+def get_input_ref(
+    action: AgentAction,
+    target: SemanticTarget | None,
+) -> str | None:
+    """
+    Connect a discovered form action to the capability's
+    typed invocation input.
+
+    The live discovery action may contain an example value,
+    but the reusable artifact stores only the input reference.
+    """
+
+    if (
+        action.action != ActionType.FILL
+        or target is None
+    ):
+        return None
+
+    if target.role.casefold() != "textbox":
+        return None
+
+    input_mapping = {
+        "name": "name",
+        "email": "email",
+        "phone": "phone",
+        "message": "message",
+    }
+
+    normalized_name = target.name.strip().casefold()
+
+    return input_mapping.get(normalized_name)
+
+
+def sanitize_action_for_artifact(
+    action: AgentAction,
+    input_ref: str | None,
+) -> AgentAction:
+    """
+    Create the reusable recorded action.
+
+    When an action consumes an invocation input, do not
+    persist the concrete discovery value.
+    """
+
+    if input_ref is None:
+        return action.model_copy(deep=True)
+
+    return action.model_copy(
+        update={
+            "value": None,
+        },
+        deep=True,
+    )
+
+capability_goal = (
+        "Navigate to the Contact Us page and fill out the "
+        "Customer Care form using the supplied name, email, "
+        "phone, and message inputs. Do not submit the form. "
+        "Complete when all four fields have been filled."
+    )
 
 def main():
     evidence_dir = Path("evidence")
@@ -159,17 +223,115 @@ def main():
     )
 
     goal = (
-    "Navigate to the Contact Us page and fill out the Customer Care form "
-    "using Name 'Demo User', Email 'demo@example.com', Phone '555-0100', "
-    "and Message 'Automated test message'. "
-    "Do not submit the form. "
-    "Complete when all four fields have been filled."
-)
+        "Navigate to the Contact Us page and fill out the Customer Care form "
+        "using Name 'Demo User', Email 'demo@example.com', Phone '555-0100', "
+        "and Message 'Automated test message'. "
+        "Do not submit the form. "
+        "Complete when all four fields have been filled."
+    )
 
     artifact = CapabilityArtifact(
         capability_name="fill_customer_care_form",
-        goal=goal,
+        goal=capability_goal,
         target_domain="parabank.parasoft.com",
+    )
+
+    # --------------------------------------------------------------
+    # Capability contract: typed inputs
+    # --------------------------------------------------------------
+
+    artifact.add_input(
+        name="name",
+        value_type=ValueType.STRING,
+        description="Name to enter in the Customer Care form.",
+    )
+
+    artifact.add_input(
+        name="email",
+        value_type=ValueType.STRING,
+        description="Email address to enter in the Customer Care form.",
+    )
+
+    artifact.add_input(
+        name="phone",
+        value_type=ValueType.STRING,
+        description="Phone number to enter in the Customer Care form.",
+    )
+
+    artifact.add_input(
+        name="message",
+        value_type=ValueType.STRING,
+        description="Message to enter in the Customer Care form.",
+    )
+
+    # --------------------------------------------------------------
+    # Capability contract: typed outputs
+    # --------------------------------------------------------------
+    #
+    # This capability intentionally does not submit the form and does
+    # not extract a business value. Therefore output_schema remains
+    # empty. Other capabilities can declare typed outputs with
+    # artifact.add_output(...).
+    # --------------------------------------------------------------
+
+    # --------------------------------------------------------------
+    # Capability contract: deterministic success checkpoints
+    # --------------------------------------------------------------
+
+    artifact.add_checkpoint(
+        CheckpointType.URL_PATH,
+        expected_path="/parabank/contact.htm",
+        description=(
+            "Replay must finish on the Customer Care page."
+        ),
+    )
+
+    artifact.add_checkpoint(
+        CheckpointType.FIELD_VALUE,
+        target=SemanticTarget(
+            role="textbox",
+            name="name",
+        ),
+        expected_value="${name}",
+        description=(
+            "Name field must contain the supplied name."
+        ),
+    )
+
+    artifact.add_checkpoint(
+        CheckpointType.FIELD_VALUE,
+        target=SemanticTarget(
+            role="textbox",
+            name="email",
+        ),
+        expected_value="${email}",
+        description=(
+            "Email field must contain the supplied email."
+        ),
+    )
+
+    artifact.add_checkpoint(
+        CheckpointType.FIELD_VALUE,
+        target=SemanticTarget(
+            role="textbox",
+            name="phone",
+        ),
+        expected_value="${phone}",
+        description=(
+            "Phone field must contain the supplied phone number."
+        ),
+    )
+
+    artifact.add_checkpoint(
+        CheckpointType.FIELD_VALUE,
+        target=SemanticTarget(
+            role="textbox",
+            name="message",
+        ),
+        expected_value="${message}",
+        description=(
+            "Message field must contain the supplied message."
+        ),
     )
 
     with sync_playwright() as playwright:
@@ -197,6 +359,10 @@ def main():
         guardrails = Guardrails(
             allowed_domains={
                 "parabank.parasoft.com"
+            },
+            allowed_routes={
+                "/parabank/index.htm",
+                "/parabank/contact.htm",
             },
             allowed_actions={
                 ActionType.FILL,
@@ -290,10 +456,12 @@ def main():
                         "reason": action.reason,
                     },
                 )
+
                 print(
                     "\nAgent reports that the goal "
                     "has been completed."
                 )
+
                 completed = True
                 break
 
@@ -326,8 +494,8 @@ def main():
                         indent=2
                     )
                 )
-                handoff_created = True
 
+                handoff_created = True
                 break
 
             # Resolve the temporary numeric ID into semantic
@@ -351,11 +519,11 @@ def main():
 
             try:
                 extracted_value = execute_action(
-                surface=surface,
-                guardrails=guardrails,
-                action=action,
-                logger=logger,
-                step_number=step_number,
+                    surface=surface,
+                    guardrails=guardrails,
+                    action=action,
+                    logger=logger,
+                    step_number=step_number,
                 )
 
                 logger.log(
@@ -399,15 +567,26 @@ def main():
                         indent=2
                     )
                 )
-                handoff_created = True
 
+                handoff_created = True
                 break
+
+            input_ref = get_input_ref(
+                action=action,
+                target=semantic_target,
+            )
+
+            recorded_action = sanitize_action_for_artifact(
+                action=action,
+                input_ref=input_ref,
+            )
 
             artifact.add_step(
                 step_number=step_number,
                 url_before=url_before,
-                action=action,
+                action=recorded_action,
                 target=semantic_target,
+                input_ref=input_ref,
                 extracted_value=extracted_value,
             )
 

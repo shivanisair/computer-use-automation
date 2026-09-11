@@ -1,9 +1,36 @@
 {
-  "version": "1.1",
+  "version": "1.3",
   "capability_name": "fill_customer_care_form",
-  "goal": "Navigate to the Contact Us page and fill out the Customer Care form using Name 'Demo User', Email 'demo@example.com', Phone '555-0100', and Message 'Automated test message'. Do not submit the form. Complete when all four fields have been filled.",
+  "goal": "Navigate to the Contact Us page and fill out the Customer Care form using the supplied name, email, phone, and message inputs. Do not submit the form. Complete when all four fields have been filled.",
   "target_domain": "parabank.parasoft.com",
-  "created_at": "2026-09-09T18:25:03.223895Z",
+  "created_at": "2026-09-10T20:40:05.109339Z",
+  "input_schema": [
+    {
+      "name": "name",
+      "type": "string",
+      "description": "Name to enter in the Customer Care form.",
+      "required": true
+    },
+    {
+      "name": "email",
+      "type": "string",
+      "description": "Email address to enter in the Customer Care form.",
+      "required": true
+    },
+    {
+      "name": "phone",
+      "type": "string",
+      "description": "Phone number to enter in the Customer Care form.",
+      "required": true
+    },
+    {
+      "name": "message",
+      "type": "string",
+      "description": "Message to enter in the Customer Care form.",
+      "required": true
+    }
+  ],
+  "output_schema": [],
   "steps": [
     {
       "step_number": 1,
@@ -13,77 +40,131 @@
         "target_id": 33,
         "value": null,
         "output_name": null,
-        "reason": "Open the Contact Us page so I can fill out the Customer Care form without submitting it."
+        "reason": "Open the Contact Us page to access the Customer Care form."
       },
       "target": {
         "role": "link",
         "name": "Contact Us"
       },
+      "input_ref": null,
       "extracted_value": null
     },
     {
       "step_number": 2,
-      "url_before": "https://parabank.parasoft.com/parabank/contact.htm;jsessionid=B08A79A0B0971306A15735F75B843AB7",
+      "url_before": "https://parabank.parasoft.com/parabank/contact.htm;jsessionid=D1E35BF7EFDD0AE143FB8FF4A2CE2569",
       "action": {
         "action": "fill",
         "target_id": 14,
-        "value": "Demo User",
+        "value": null,
         "output_name": null,
-        "reason": "Fill the Name field in the Customer Care form."
+        "reason": "Fill the Customer Care name field first."
       },
       "target": {
         "role": "textbox",
         "name": "name"
       },
+      "input_ref": "name",
       "extracted_value": null
     },
     {
       "step_number": 3,
-      "url_before": "https://parabank.parasoft.com/parabank/contact.htm;jsessionid=B08A79A0B0971306A15735F75B843AB7",
+      "url_before": "https://parabank.parasoft.com/parabank/contact.htm;jsessionid=D1E35BF7EFDD0AE143FB8FF4A2CE2569",
       "action": {
         "action": "fill",
         "target_id": 15,
-        "value": "demo@example.com",
+        "value": null,
         "output_name": null,
-        "reason": "Fill the Email field in the Customer Care form as requested."
+        "reason": "Need to fill the Email field on the Customer Care form without submitting."
       },
       "target": {
         "role": "textbox",
         "name": "email"
       },
+      "input_ref": "email",
       "extracted_value": null
     },
     {
       "step_number": 4,
-      "url_before": "https://parabank.parasoft.com/parabank/contact.htm;jsessionid=B08A79A0B0971306A15735F75B843AB7",
+      "url_before": "https://parabank.parasoft.com/parabank/contact.htm;jsessionid=D1E35BF7EFDD0AE143FB8FF4A2CE2569",
       "action": {
         "action": "fill",
         "target_id": 16,
-        "value": "555-0100",
+        "value": null,
         "output_name": null,
-        "reason": "Fill the remaining Customer Care form field, then the form will be complete without submitting."
+        "reason": "Fill the Phone field in the Customer Care form without submitting, as requested."
       },
       "target": {
         "role": "textbox",
         "name": "phone"
       },
+      "input_ref": "phone",
       "extracted_value": null
     },
     {
       "step_number": 5,
-      "url_before": "https://parabank.parasoft.com/parabank/contact.htm;jsessionid=B08A79A0B0971306A15735F75B843AB7",
+      "url_before": "https://parabank.parasoft.com/parabank/contact.htm;jsessionid=D1E35BF7EFDD0AE143FB8FF4A2CE2569",
       "action": {
         "action": "fill",
         "target_id": 17,
-        "value": "Automated test message",
+        "value": null,
         "output_name": null,
-        "reason": "The form is already populated with the requested Name, Email, and Phone values; only the Message field remains to be filled before completing the task."
+        "reason": "The Name, Email, and Phone fields are already filled; only the Message field remains to complete the Customer Care form without submitting."
       },
       "target": {
         "role": "textbox",
         "name": "message"
       },
+      "input_ref": "message",
       "extracted_value": null
+    }
+  ],
+  "success_checkpoints": [
+    {
+      "type": "url_path",
+      "target": null,
+      "expected_value": null,
+      "expected_path": "/parabank/contact.htm",
+      "description": "Replay must finish on the Customer Care page."
+    },
+    {
+      "type": "field_value",
+      "target": {
+        "role": "textbox",
+        "name": "name"
+      },
+      "expected_value": "${name}",
+      "expected_path": null,
+      "description": "Name field must contain the supplied name."
+    },
+    {
+      "type": "field_value",
+      "target": {
+        "role": "textbox",
+        "name": "email"
+      },
+      "expected_value": "${email}",
+      "expected_path": null,
+      "description": "Email field must contain the supplied email."
+    },
+    {
+      "type": "field_value",
+      "target": {
+        "role": "textbox",
+        "name": "phone"
+      },
+      "expected_value": "${phone}",
+      "expected_path": null,
+      "description": "Phone field must contain the supplied phone number."
+    },
+    {
+      "type": "field_value",
+      "target": {
+        "role": "textbox",
+        "name": "message"
+      },
+      "expected_value": "${message}",
+      "expected_path": null,
+      "description": "Message field must contain the supplied message."
     }
   ],
   "outputs": {}

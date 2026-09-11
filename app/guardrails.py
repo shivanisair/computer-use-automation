@@ -16,10 +16,12 @@ class Guardrails:
         self,
         allowed_domains: set[str],
         allowed_actions: set[ActionType],
+        allowed_routes: set[str] | None = None,
         blocked_targets: set[tuple[str, str]] | None = None,
     ):
         self.allowed_domains = allowed_domains
         self.allowed_actions = allowed_actions
+        self.allowed_routes = allowed_routes or set()
         self.blocked_targets = blocked_targets or set()
 
     def check(
@@ -48,6 +50,26 @@ class Guardrails:
                 allowed=False,
                 reason=(
                     f"Domain '{domain}' "
+                    "is not allowlisted."
+                ),
+            )
+
+        route = parsed.path
+
+        if ";jsessionid=" in route:
+            route = route.split(
+                ";jsessionid=",
+                1,
+            )[0]
+
+        if (
+            self.allowed_routes
+            and route not in self.allowed_routes
+        ):
+            return GuardrailDecision(
+                allowed=False,
+                reason=(
+                    f"Route '{route}' "
                     "is not allowlisted."
                 ),
             )

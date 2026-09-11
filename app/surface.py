@@ -4,6 +4,18 @@ from typing import Any
 from playwright.sync_api import Page
 
 
+def normalize_semantic_text(value: str) -> str:
+    """
+    Normalize semantic identifiers for robust matching.
+
+    Case differences and insignificant whitespace should not
+    cause deterministic replay to fail.
+    """
+    return " ".join(
+        value.strip().casefold().split()
+    )
+
+
 @dataclass
 class UIElement:
     id: int
@@ -115,13 +127,27 @@ class PlaywrightSurface:
         role: str,
         name: str,
     ):
+        """
+        Resolve a recorded semantic target against the live UI.
+
+        Matching is case-insensitive and ignores insignificant
+        whitespace, while still requiring both role and name.
+        """
+
         observation = self.observe()
+
+        normalized_role = normalize_semantic_text(role)
+        normalized_name = normalize_semantic_text(name)
 
         matches = [
             element
             for element in observation.elements
-            if element.role == role
-            and element.name == name
+            if (
+                normalize_semantic_text(element.role)
+                == normalized_role
+                and normalize_semantic_text(element.name)
+                == normalized_name
+            )
         ]
 
         if not matches:
@@ -253,8 +279,10 @@ class PlaywrightSurface:
 
         try:
             inner_text = locator.inner_text().strip()
+
             if inner_text:
                 return inner_text
+
         except Exception:
             pass
 
@@ -269,6 +297,7 @@ class PlaywrightSurface:
             value = locator.get_attribute(
                 "value"
             )
+
             if value:
                 return value.strip()
 
