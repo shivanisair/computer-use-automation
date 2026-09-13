@@ -103,6 +103,18 @@ def parse_arguments() -> argparse.Namespace:
         help="Message to enter in the Customer Care form.",
     )
 
+    parser.add_argument(
+        "--demo-handoff-step",
+        type=int,
+        default=None,
+        help=(
+            "Optional evidence/demo mode. Before this recorded step, "
+            "automation transfers control of the same live browser to "
+            "the human operator. The human performs that step manually, "
+            "then presses Enter so deterministic replay can resume."
+        ),
+    )
+
     return parser.parse_args()
 
 
@@ -601,6 +613,220 @@ def print_result(
     print(result.model_dump_json(indent=2))
 
 
+
+def describe_human_step(
+    step,
+    inputs: dict[str, Any],
+) -> str:
+    """
+    Build an operator instruction for a recorded step.
+
+    Invocation values may be displayed in the terminal for the
+    human operator, but they are deliberately not written to the
+    structured replay log.
+    """
+
+    action_name = step.action.action.value
+
+    if step.target is None:
+        return (
+            f"Perform the recorded {action_name!r} action "
+            "in the live browser."
+        )
+
+    target_description = (
+        f"role={step.target.role!r}, "
+        f"name={step.target.name!r}"
+    )
+
+    if step.action.action in {
+        ActionType.FILL,
+        ActionType.SELECT,
+    }:
+        value = replay_value_for_action(
+            step.action,
+            step.input_ref,
+            inputs,
+        )
+
+        return (
+            f"Manually {action_name} {target_description} "
+            f"using this invocation value: {value!r}"
+        )
+
+    if step.action.action == ActionType.CLICK:
+        return (
+            f"Manually click {target_description}."
+        )
+
+    if step.action.action == ActionType.EXTRACT:
+        return (
+            f"Manually inspect {target_description}. "
+            "When finished, return control to automation."
+        )
+
+    if step.action.action == ActionType.WAIT:
+        return (
+            "Wait until the page is ready, then return "
+            "control to automation."
+        )
+
+    return (
+        f"Perform the recorded {action_name!r} action on "
+        f"{target_description}."
+    )
+
+
+def perform_same_session_handoff(
+    *,
+    page,
+    logger: RunLogger,
+    replay_screenshot_dir: Path,
+    handoff,
+    step,
+    inputs: dict[str, Any],
+) -> None:
+    """
+    Transfer the existing live browser session to a human operator.
+
+    Playwright and the browser remain alive while automation blocks
+    on terminal input. The operator uses the already-open browser,
+    performs the requested recorded step manually, and presses Enter
+    to return control. Structured logs record ownership transitions
+    without persisting invocation values.
+    """
+
+    before_path = (
+        replay_screenshot_dir
+        / f"handoff_step_{step.step_number}_before.png"
+    )
+    after_path = (
+        replay_screenshot_dir
+        / f"handoff_step_{step.step_number}_after.png"
+    )
+
+    page.screenshot(path=before_path)
+
+    logger.log(
+        "handoff_requested",
+        step_number=step.step_number,
+        data={
+            "error_category": handoff.category.value,
+            "reason": handoff.reason,
+            "current_url": page.url,
+            "suggested_human_action": (
+                handoff.suggested_human_action
+            ),
+        },
+    )
+
+    logger.log(
+        "control_transferred_to_human",
+        step_number=step.step_number,
+        data={
+            "current_url": page.url,
+            "recorded_action": step.action.action.value,
+            "target_role": (
+                step.target.role
+                if step.target is not None
+                else None
+            ),
+            "target_name": (
+                step.target.name
+                if step.target is not None
+                else None
+            ),
+            "input_ref": step.input_ref,
+            "before_screenshot": str(before_path),
+        },
+    )
+
+    print("\n" + "=" * 70)
+    print("HUMAN CONTROL — SAME LIVE BROWSER SESSION")
+    print("=" * 70)
+    print(handoff.model_dump_json(indent=2))
+    print("\nOperator instruction:")
+    print(describe_human_step(step, inputs))
+    print(
+        "\nAutomation is PAUSED. Use the browser window that is "
+        "already open. Do not open a new browser/session."
+    )
+
+    input(
+        "\nWhen the manual action is complete, return here "
+        "and press Enter to give control back to automation..."
+    )
+
+    page.screenshot(path=after_path)
+
+    logger.log(
+        "human_action_recorded",
+        step_number=step.step_number,
+        data={
+            "recorded_action": step.action.action.value,
+            "target_role": (
+                step.target.role
+                if step.target is not None
+                else None
+            ),
+            "target_name": (
+                step.target.name
+                if step.target is not None
+                else None
+            ),
+            "input_ref": step.input_ref,
+            "after_screenshot": str(after_path),
+        },
+    )
+
+    logger.log(
+        "control_returned_to_automation",
+        step_number=step.step_number,
+        data={
+            "current_url": page.url,
+        },
+    )
+
+    print("\nControl returned to automation.")
+    print(f"Current URL: {page.url}")
+
+
+def verify_human_performed_step(
+    *,
+    surface: PlaywrightSurface,
+    step,
+    inputs: dict[str, Any],
+) -> None:
+    """
+    Verify observable state after a human performs a recorded step.
+
+    FILL actions are checked immediately. CLICK actions are verified
+    by the next step's URL precondition and final checkpoints.
+    """
+
+    if (
+        step.action.action == ActionType.FILL
+        and step.target is not None
+    ):
+        expected = replay_value_for_action(
+            step.action,
+            step.input_ref,
+            inputs,
+        )
+
+        observed = get_field_value(
+            surface,
+            step.target,
+        )
+
+        if observed != str(expected):
+            raise RecoverableAutomationError(
+                "Human handoff step did not produce the expected "
+                "field state. The supplied invocation value was "
+                "not observed in the target control."
+            )
+
+
 def main():
     args = parse_arguments()
 
@@ -627,6 +853,19 @@ def main():
             inputs,
         )
 
+        if args.demo_handoff_step is not None:
+            recorded_step_numbers = {
+                step.step_number
+                for step in artifact.steps
+            }
+
+            if args.demo_handoff_step not in recorded_step_numbers:
+                raise HardAutomationFailure(
+                    "--demo-handoff-step must identify a recorded "
+                    f"artifact step. Available steps: "
+                    f"{sorted(recorded_step_numbers)}"
+                )
+
         logger.log(
             "run_started",
             data={
@@ -635,6 +874,7 @@ def main():
                 "artifact_path": str(ARTIFACT_PATH),
                 "target_url": TARGET_URL,
                 "input_names": sorted(inputs.keys()),
+                "demo_handoff_step": args.demo_handoff_step,
             },
         )
 
@@ -861,6 +1101,83 @@ def main():
 
                 replay_completed = False
                 break
+
+            if args.demo_handoff_step == step.step_number:
+                handoff = create_handoff(
+                    category=ErrorCategory.RECOVERABLE_ERROR,
+                    reason=(
+                        "Demonstration handoff requested so a human "
+                        "operator can perform this recorded step in "
+                        "the same live browser session."
+                    ),
+                    step_number=step.step_number,
+                    current_url=page.url,
+                    last_action=str(step.action),
+                )
+
+                try:
+                    perform_same_session_handoff(
+                        page=page,
+                        logger=logger,
+                        replay_screenshot_dir=replay_screenshot_dir,
+                        handoff=handoff,
+                        step=step,
+                        inputs=inputs,
+                    )
+
+                    verify_human_performed_step(
+                        surface=surface,
+                        step=step,
+                        inputs=inputs,
+                    )
+
+                    logger.log(
+                        "automation_resumed",
+                        step_number=step.step_number,
+                        data={
+                            "current_url": page.url,
+                            "resumed_after_human_step": True,
+                        },
+                    )
+
+                    logger.log(
+                        "step_completed",
+                        step_number=step.step_number,
+                        data={
+                            "action": step.action.action.value,
+                            "current_url": page.url,
+                            "performed_by": "human",
+                        },
+                    )
+
+                    print(
+                        "\nHuman-performed step verified. "
+                        "Deterministic automation is resuming."
+                    )
+                    continue
+
+                except RecoverableAutomationError as error:
+                    failed_result = ReplayResult(
+                        status=ReplayStatus.FAILURE,
+                        capability_name=artifact.capability_name,
+                        artifact_version=artifact.version,
+                        error_category=error.category,
+                        failed_step=step.step_number,
+                        reason=error.reason,
+                    )
+
+                    logger.log(
+                        "run_failed",
+                        step_number=step.step_number,
+                        data={
+                            "error_category": error.category.value,
+                            "reason": error.reason,
+                            "stage": "human_handoff_verification",
+                        },
+                    )
+
+                    replay_completed = False
+                    break
 
             print("\nRECORDED ACTION")
             print("-" * 70)

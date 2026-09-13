@@ -16,6 +16,10 @@ class ErrorCategory(str, Enum):
 class HandoffRequest(BaseModel):
     """
     Structured context provided when automation cannot safely continue.
+
+    The request describes why control is being transferred. The replay
+    layer is responsible for pausing automation while preserving the
+    same live browser session and for recording control transitions.
     """
 
     category: ErrorCategory
@@ -88,8 +92,9 @@ def create_handoff(
 
     if category == ErrorCategory.RECOVERABLE_ERROR:
         suggested_action = (
-            "Review the current UI state and decide whether "
-            "the automation should retry or use an alternate control."
+            "Review the current UI state, perform the requested "
+            "manual recovery in the existing browser session, and "
+            "return control when the UI is ready for automation."
         )
 
     elif category == ErrorCategory.BUSINESS_OUTCOME:
