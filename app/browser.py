@@ -321,6 +321,24 @@ def parse_args():
     )
 
     parser.add_argument(
+        "--target-url",
+        default=TARGET_URL,
+        help=(
+            "Target application URL for discovery. "
+            "Defaults to the ParaBank demo application."
+        ),
+    )
+
+    parser.add_argument(
+        "--goal",
+        default=None,
+        help=(
+            "Natural-language goal for the discovery agent. "
+            "If omitted, the ParaBank Customer Care demo goal is used."
+        ),
+    )
+
+    parser.add_argument(
         "--demo-handoff-step",
         type=int,
         default=None,
@@ -349,13 +367,16 @@ def main():
         exist_ok=True,
     )
 
-    goal = (
+    default_goal = (
         "Navigate to the Contact Us page and fill out the Customer Care form "
         "using Name 'Demo User', Email 'demo@example.com', Phone '555-0100', "
         "and Message 'Automated test message'. "
         "Do not submit the form. "
         "Complete when all four fields have been filled."
     )
+
+    goal = args.goal or default_goal
+    target_url = args.target_url
 
     artifact = CapabilityArtifact(
         capability_name="fill_customer_care_form",
@@ -473,12 +494,12 @@ def main():
             }
         )
 
-        print(f"Opening: {TARGET_URL}")
+        print(f"Opening: {target_url}")
 
         page.goto(
-            TARGET_URL,
-            wait_until="domcontentloaded",
-            timeout=30_000,
+        target_url,
+        wait_until="domcontentloaded",
+        timeout=30_000,
         )
 
         surface = PlaywrightSurface(page)
@@ -511,7 +532,7 @@ def main():
             "run_started",
             data={
                 "capability_name": artifact.capability_name,
-                "target_url": TARGET_URL,
+                "target_url": target_url,
                 "max_steps": MAX_STEPS,
             },
         )
