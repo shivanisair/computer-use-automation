@@ -1,7 +1,6 @@
+import argparse
 from pathlib import Path
-
 from playwright.sync_api import sync_playwright
-
 from app.agent import ActionType, AgentAction, decide_action
 from app.artifact import (
     CapabilityArtifact,
@@ -146,6 +145,7 @@ def execute_action(
 
     return None
 
+
 def get_input_ref(
     action: AgentAction,
     target: SemanticTarget | None,
@@ -200,14 +200,141 @@ def sanitize_action_for_artifact(
         deep=True,
     )
 
-capability_goal = (
-        "Navigate to the Contact Us page and fill out the "
-        "Customer Care form using the supplied name, email, "
-        "phone, and message inputs. Do not submit the form. "
-        "Complete when all four fields have been filled."
+
+def perform_discovery_handoff(
+    *,
+    page,
+    logger: RunLogger,
+    screenshot_dir: Path,
+    step_number: int,
+    reason: str,
+    last_action: str | None,
+) -> None:
+    """
+    Pause discovery and transfer the same live browser session
+    to a human operator.
+
+    The human can modify the current UI directly. After the
+    operator signals completion, control returns to automation.
+    The caller then re-observes the live page before asking the
+    LLM for another decision.
+    """
+
+    handoff = create_handoff(
+        category=ErrorCategory.RECOVERABLE_ERROR,
+        reason=reason,
+        step_number=step_number,
+        current_url=page.url,
+        last_action=last_action,
     )
 
+    before_path = (
+        screenshot_dir
+        / f"discovery_handoff_step_{step_number}_before.png"
+    )
+
+    after_path = (
+        screenshot_dir
+        / f"discovery_handoff_step_{step_number}_after.png"
+    )
+
+    page.screenshot(path=before_path)
+
+    logger.log(
+        "handoff_requested",
+        step_number=step_number,
+        data={
+            "category": ErrorCategory.RECOVERABLE_ERROR.value,
+            "reason": reason,
+            "current_url": page.url,
+            "before_screenshot": str(before_path),
+        },
+    )
+
+    logger.log(
+        "control_transferred_to_human",
+        step_number=step_number,
+        data={
+            "control_owner": "human",
+            "current_url": page.url,
+        },
+    )
+
+    print("\n" + "=" * 70)
+    print("HUMAN CONTROL — SAME LIVE BROWSER SESSION")
+    print("=" * 70)
+
+    print(
+        handoff.model_dump_json(
+            indent=2
+        )
+    )
+
+    print(
+        "\nAutomation is paused."
+        "\nUse the currently open browser window to perform "
+        "the required recovery."
+    )
+
+    input(
+        "\nWhen the browser is ready for automation to continue, "
+        "press Enter here..."
+    )
+
+    page.screenshot(path=after_path)
+
+    logger.log(
+        "human_action_recorded",
+        step_number=step_number,
+        data={
+            "after_screenshot": str(after_path),
+            "current_url": page.url,
+        },
+    )
+
+    logger.log(
+        "control_returned_to_automation",
+        step_number=step_number,
+        data={
+            "control_owner": "automation",
+            "current_url": page.url,
+        },
+    )
+
+    print("\nControl returned to automation.")
+    print(
+        "Discovery will re-observe the current live UI "
+        "before making another decision."
+    )
+
+
+capability_goal = (
+    "Navigate to the Contact Us page and fill out the "
+    "Customer Care form using the supplied name, email, "
+    "phone, and message inputs. Do not submit the form. "
+    "Complete when all four fields have been filled."
+)
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Run LLM-driven capability discovery."
+    )
+
+    parser.add_argument(
+        "--demo-handoff-step",
+        type=int,
+        default=None,
+        help=(
+            "Optional evidence/demo mode. Before this discovery step, "
+            "transfer control of the same live browser session to a "
+            "human operator, then re-observe and continue."
+        ),
+    )
+
+    return parser.parse_args()
+
 def main():
+    args = parse_args()
     evidence_dir = Path("evidence")
     screenshot_dir = evidence_dir / "screenshots"
     artifact_dir = evidence_dir / "artifacts"
@@ -397,17 +524,49 @@ def main():
         print(goal)
 
         completed = False
-        handoff_created = False
+        hard_failure = False
+        demo_handoff_used = False
 
-        for step_number in range(
-            1,
-            MAX_STEPS + 1,
-        ):
+        step_number = 1
+
+        while step_number <= MAX_STEPS:
             print("\n" + "=" * 70)
             print(
                 f"DISCOVERY STEP {step_number}"
             )
             print("=" * 70)
+
+            if (
+                args.demo_handoff_step == step_number
+                and not demo_handoff_used
+            ):
+                perform_discovery_handoff(
+                    page=page,
+                    logger=logger,
+                    screenshot_dir=screenshot_dir,
+                    step_number=step_number,
+                    reason=(
+                        "Controlled discovery handoff requested "
+                        "for evidence/demo testing."
+                    ),
+                    last_action=None,
+                )
+
+                demo_handoff_used = True
+
+                logger.log(
+                    "automation_resumed",
+                    step_number=step_number,
+                    data={
+                        "reobserve_required": True,
+                        "demo_handoff": True,
+                    },
+                )
+
+                print(
+                    "\nAutomation is re-observing the UI "
+                    "after human control."
+                )
 
             observation = surface.observe()
 
@@ -466,37 +625,26 @@ def main():
                 break
 
             if action.action == ActionType.ESCALATE:
-                handoff = create_handoff(
-                    category=ErrorCategory.RECOVERABLE_ERROR,
-                    reason=action.reason,
+                perform_discovery_handoff(
+                    page=page,
+                    logger=logger,
+                    screenshot_dir=screenshot_dir,
                     step_number=step_number,
-                    current_url=page.url,
+                    reason=action.reason,
                     last_action=str(action),
                 )
 
                 logger.log(
-                    "human_handoff",
+                    "automation_resumed",
                     step_number=step_number,
                     data={
-                        "category": (
-                            ErrorCategory
-                            .RECOVERABLE_ERROR
-                            .value
-                        ),
-                        "reason": action.reason,
+                        "reobserve_required": True,
                     },
                 )
 
-                print("\nHUMAN HANDOFF")
-                print("-" * 70)
-                print(
-                    handoff.model_dump_json(
-                        indent=2
-                    )
-                )
-
-                handoff_created = True
-                break
+                # Do not increment the step. Re-observe the same live
+                # browser state and let the LLM decide what comes next.
+                continue
 
             # Resolve the temporary numeric ID into semantic
             # information BEFORE changing the page.
@@ -534,33 +682,36 @@ def main():
                     },
                 )
 
-            except Exception as error:
-                category = (
-                    ErrorCategory.HARD_FAILURE
-                    if isinstance(error, PermissionError)
-                    else ErrorCategory.RECOVERABLE_ERROR
-                )
-
+            except PermissionError as error:
                 logger.log(
                     "action_failed",
                     step_number=step_number,
                     data={
                         "action": action.action.value,
                         "error_type": type(error).__name__,
-                        "category": category.value,
+                        "category": ErrorCategory.HARD_FAILURE.value,
                         "error": str(error),
                     },
                 )
 
                 handoff = create_handoff(
-                    category=category,
+                    category=ErrorCategory.HARD_FAILURE,
                     reason=str(error),
                     step_number=step_number,
                     current_url=page.url,
                     last_action=str(action),
                 )
 
-                print("\nHUMAN HANDOFF")
+                logger.log(
+                    "hard_failure",
+                    step_number=step_number,
+                    data={
+                        "category": ErrorCategory.HARD_FAILURE.value,
+                        "reason": str(error),
+                    },
+                )
+
+                print("\nHARD FAILURE")
                 print("-" * 70)
                 print(
                     handoff.model_dump_json(
@@ -568,8 +719,50 @@ def main():
                     )
                 )
 
-                handoff_created = True
+                print(
+                    "\nAutomation will not transfer control "
+                    "to bypass a guardrail."
+                )
+
+                hard_failure = True
                 break
+
+            except Exception as error:
+                logger.log(
+                    "action_failed",
+                    step_number=step_number,
+                    data={
+                        "action": action.action.value,
+                        "error_type": type(error).__name__,
+                        "category": (
+                            ErrorCategory
+                            .RECOVERABLE_ERROR
+                            .value
+                        ),
+                        "error": str(error),
+                    },
+                )
+
+                perform_discovery_handoff(
+                    page=page,
+                    logger=logger,
+                    screenshot_dir=screenshot_dir,
+                    step_number=step_number,
+                    reason=str(error),
+                    last_action=str(action),
+                )
+
+                logger.log(
+                    "automation_resumed",
+                    step_number=step_number,
+                    data={
+                        "reobserve_required": True,
+                    },
+                )
+
+                # The failed action is NOT recorded in the artifact.
+                # Re-observe the live UI after the human recovery.
+                continue
 
             input_ref = get_input_ref(
                 action=action,
@@ -596,6 +789,8 @@ def main():
             )
 
             page.wait_for_timeout(500)
+
+            step_number += 1
 
         if completed:
             artifact_path = (
@@ -624,7 +819,7 @@ def main():
             )
 
         else:
-            if not handoff_created:
+            if not hard_failure:
                 reason = (
                     f"Discovery reached the maximum "
                     f"step limit of {MAX_STEPS} "
