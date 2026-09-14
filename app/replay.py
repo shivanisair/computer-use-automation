@@ -1089,15 +1089,6 @@ def main():
                     },
                 )
 
-                logger.log(
-                    "run_failed",
-                    step_number=step.step_number,
-                    data={
-                        "error_category": error.category.value,
-                        "reason": error.reason,
-                        "stage": "action_execution",
-                    },
-                )
 
                 replay_completed = False
                 break
