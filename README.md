@@ -89,21 +89,27 @@ export OPENAI_API_KEY="your-key"
 
 `OPENAI_API_KEY` is required for discovery. Deterministic replay itself does not require an LLM call.
 
-## Run discovery
+## Run discovery from a natural-language goal
+
+The discovery runner accepts both the target application/entry point and a natural-language goal. For the included ParaBank vertical slice, run:
 
 ```bash
-python -m app.browser
+python -m app.browser \
+  --target-url "https://parabank.parasoft.com/parabank/index.htm" \
+  --goal "Navigate to the Contact Us page and fill out the Customer Care form using Name 'Demo User', Email 'demo@example.com', Phone '555-0100', and Message 'Automated test message'. Do not submit the form. After filling all four fields, extract the Message field value as output 'message_value'. Complete only after the value has been extracted."
 ```
 
-A successful run saves/updates:
+The LLM observes the live UI and decides the discovery actions needed to achieve that goal. A successful run saves/updates the reusable artifact at:
 
 ```text
 evidence/artifacts/fill_customer_care_form.json
 ```
 
-Discovery is intentionally bounded by maximum step, attempt, and handoff counts.
+Discovery is intentionally bounded by maximum step, attempt, and handoff counts. Running `python -m app.browser` without arguments uses the same ParaBank target and demo goal as defaults.
 
 ## Run deterministic replay
+
+Replay the resulting artifact with fresh invocation values:
 
 ```bash
 python -m app.replay \
@@ -114,6 +120,8 @@ python -m app.replay \
 ```
 
 Expected behavior: replay opens ParaBank, follows the recorded semantic steps without asking an LLM what to do, verifies the checkpoints, and prints a structured result whose declared output includes `message_value`.
+
+This demonstrates the intended through-line: **natural-language goal + target → LLM discovery → typed/versioned artifact → deterministic replay with caller-supplied inputs and declared outputs**.
 
 ## Human-handoff evidence
 
@@ -138,20 +146,14 @@ python -m app.error_demo
 
 ## Verification
 
-Before submission, run:
+The core implementation can be checked with:
 
 ```bash
 python -m py_compile app/*.py
 python -m app.error_demo
-python -m app.browser
-python -m app.replay \
-  --name "Replay User" \
-  --email "replay@example.com" \
-  --phone "555-0200" \
-  --message "Replay test message"
 ```
 
-Then inspect the structured evidence:
+The repository already includes saved discovery/replay evidence. Running discovery or replay again will generate new evidence files. To inspect the committed evidence without changing it:
 
 ```bash
 find evidence -maxdepth 2 -type f -print | sort
