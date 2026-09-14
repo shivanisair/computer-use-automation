@@ -5,191 +5,28 @@
   "target_domain": "parabank.parasoft.com",
   "created_at": "2026-09-14T19:40:52.620608Z",
   "input_schema": [
-    {
-      "name": "name",
-      "type": "string",
-      "description": "Name to enter in the Customer Care form.",
-      "required": true
-    },
-    {
-      "name": "email",
-      "type": "string",
-      "description": "Email address to enter in the Customer Care form.",
-      "required": true
-    },
-    {
-      "name": "phone",
-      "type": "string",
-      "description": "Phone number to enter in the Customer Care form.",
-      "required": true
-    },
-    {
-      "name": "message",
-      "type": "string",
-      "description": "Message to enter in the Customer Care form.",
-      "required": true
-    }
+    {"name":"name","type":"string","description":"Name to enter in the Customer Care form.","required":true},
+    {"name":"email","type":"string","description":"Email address to enter in the Customer Care form.","required":true},
+    {"name":"phone","type":"string","description":"Phone number to enter in the Customer Care form.","required":true},
+    {"name":"message","type":"string","description":"Message to enter in the Customer Care form.","required":true}
   ],
   "output_schema": [
-    {
-      "name": "message_value",
-      "type": "string",
-      "description": "Message value extracted from the filled Customer Care form.",
-      "required": true
-    }
+    {"name":"message_value","type":"string","description":"Message value extracted from the filled Customer Care form.","required":true}
   ],
   "steps": [
-    {
-      "step_number": 1,
-      "url_before": "https://parabank.parasoft.com/parabank/index.htm",
-      "action": {
-        "action": "click",
-        "target_id": 33,
-        "value": null,
-        "output_name": null,
-        "reason": "Navigate to the Contact Us page to access the Customer Care form."
-      },
-      "target": {
-        "role": "link",
-        "name": "Contact Us"
-      },
-      "input_ref": null,
-      "extracted_value": null
-    },
-    {
-      "step_number": 2,
-      "url_before": "https://parabank.parasoft.com/parabank/contact.htm;jsessionid=5EE129DBA26820C3B98A0EC6F1BE4B10",
-      "action": {
-        "action": "fill",
-        "target_id": 14,
-        "value": null,
-        "output_name": null,
-        "reason": "Fill the Customer Care Name field with the requested value as part of completing the form."
-      },
-      "target": {
-        "role": "textbox",
-        "name": "name"
-      },
-      "input_ref": "name",
-      "extracted_value": null
-    },
-    {
-      "step_number": 3,
-      "url_before": "https://parabank.parasoft.com/parabank/contact.htm;jsessionid=5EE129DBA26820C3B98A0EC6F1BE4B10",
-      "action": {
-        "action": "fill",
-        "target_id": 15,
-        "value": null,
-        "output_name": null,
-        "reason": "The Contact Us form needs the email field filled before extraction; it is currently empty."
-      },
-      "target": {
-        "role": "textbox",
-        "name": "email"
-      },
-      "input_ref": "email",
-      "extracted_value": null
-    },
-    {
-      "step_number": 4,
-      "url_before": "https://parabank.parasoft.com/parabank/contact.htm;jsessionid=5EE129DBA26820C3B98A0EC6F1BE4B10",
-      "action": {
-        "action": "fill",
-        "target_id": 16,
-        "value": null,
-        "output_name": null,
-        "reason": "The Name and Email fields are already filled; fill the remaining Phone field before extracting the Message value."
-      },
-      "target": {
-        "role": "textbox",
-        "name": "phone"
-      },
-      "input_ref": "phone",
-      "extracted_value": null
-    },
-    {
-      "step_number": 5,
-      "url_before": "https://parabank.parasoft.com/parabank/contact.htm;jsessionid=5EE129DBA26820C3B98A0EC6F1BE4B10",
-      "action": {
-        "action": "fill",
-        "target_id": 17,
-        "value": null,
-        "output_name": null,
-        "reason": "The Name, Email, and Phone fields are already filled correctly; the remaining required step is to fill the Message field before extracting its value."
-      },
-      "target": {
-        "role": "textbox",
-        "name": "message"
-      },
-      "input_ref": "message",
-      "extracted_value": null
-    },
-    {
-      "step_number": 6,
-      "url_before": "https://parabank.parasoft.com/parabank/contact.htm;jsessionid=5EE129DBA26820C3B98A0EC6F1BE4B10",
-      "action": {
-        "action": "extract",
-        "target_id": 17,
-        "value": null,
-        "output_name": "message_value",
-        "reason": "All requested fields are already filled; now extract the Message field value with the required output name before completing."
-      },
-      "target": {
-        "role": "textbox",
-        "name": "message"
-      },
-      "input_ref": null,
-      "extracted_value": "Automated test message"
-    }
+    {"step_number":1,"url_before":"https://parabank.parasoft.com/parabank/index.htm","action":{"action":"click","target_id":33,"value":null,"output_name":null,"reason":"Navigate to the Contact Us page to access the Customer Care form."},"target":{"role":"link","name":"Contact Us"},"input_ref":null,"extracted_value":null},
+    {"step_number":2,"url_before":"https://parabank.parasoft.com/parabank/contact.htm;jsessionid=5EE129DBA26820C3B98A0EC6F1BE4B10","action":{"action":"fill","target_id":14,"value":null,"output_name":null,"reason":"Fill the Customer Care Name field with the requested value as part of completing the form."},"target":{"role":"textbox","name":"name"},"input_ref":"name","extracted_value":null},
+    {"step_number":3,"url_before":"https://parabank.parasoft.com/parabank/contact.htm;jsessionid=5EE129DBA26820C3B98A0EC6F1BE4B10","action":{"action":"fill","target_id":15,"value":null,"output_name":null,"reason":"The Contact Us form needs the email field filled before extraction; it is currently empty."},"target":{"role":"textbox","name":"email"},"input_ref":"email","extracted_value":null},
+    {"step_number":4,"url_before":"https://parabank.parasoft.com/parabank/contact.htm;jsessionid=5EE129DBA26820C3B98A0EC6F1BE4B10","action":{"action":"fill","target_id":16,"value":null,"output_name":null,"reason":"The Name and Email fields are already filled; fill the remaining Phone field before extracting the Message value."},"target":{"role":"textbox","name":"phone"},"input_ref":"phone","extracted_value":null},
+    {"step_number":5,"url_before":"https://parabank.parasoft.com/parabank/contact.htm;jsessionid=5EE129DBA26820C3B98A0EC6F1BE4B10","action":{"action":"fill","target_id":17,"value":null,"output_name":null,"reason":"The Name, Email, and Phone fields are already filled correctly; the remaining required step is to fill the Message field before extracting its value."},"target":{"role":"textbox","name":"message"},"input_ref":"message","extracted_value":null},
+    {"step_number":6,"url_before":"https://parabank.parasoft.com/parabank/contact.htm;jsessionid=5EE129DBA26820C3B98A0EC6F1BE4B10","action":{"action":"extract","target_id":17,"value":null,"output_name":"message_value","reason":"All requested fields are already filled; now extract the Message field value with the required output name before completing."},"target":{"role":"textbox","name":"message"},"input_ref":null,"extracted_value":null}
   ],
   "success_checkpoints": [
-    {
-      "type": "url_path",
-      "target": null,
-      "expected_value": null,
-      "expected_path": "/parabank/contact.htm",
-      "description": "Replay must finish on the Customer Care page."
-    },
-    {
-      "type": "field_value",
-      "target": {
-        "role": "textbox",
-        "name": "name"
-      },
-      "expected_value": "${name}",
-      "expected_path": null,
-      "description": "Name field must contain the supplied name."
-    },
-    {
-      "type": "field_value",
-      "target": {
-        "role": "textbox",
-        "name": "email"
-      },
-      "expected_value": "${email}",
-      "expected_path": null,
-      "description": "Email field must contain the supplied email."
-    },
-    {
-      "type": "field_value",
-      "target": {
-        "role": "textbox",
-        "name": "phone"
-      },
-      "expected_value": "${phone}",
-      "expected_path": null,
-      "description": "Phone field must contain the supplied phone number."
-    },
-    {
-      "type": "field_value",
-      "target": {
-        "role": "textbox",
-        "name": "message"
-      },
-      "expected_value": "${message}",
-      "expected_path": null,
-      "description": "Message field must contain the supplied message."
-    }
+    {"type":"url_path","target":null,"expected_value":null,"expected_path":"/parabank/contact.htm","description":"Replay must finish on the Customer Care page."},
+    {"type":"field_value","target":{"role":"textbox","name":"name"},"expected_value":"${name}","expected_path":null,"description":"Name field must contain the supplied name."},
+    {"type":"field_value","target":{"role":"textbox","name":"email"},"expected_value":"${email}","expected_path":null,"description":"Email field must contain the supplied email."},
+    {"type":"field_value","target":{"role":"textbox","name":"phone"},"expected_value":"${phone}","expected_path":null,"description":"Phone field must contain the supplied phone number."},
+    {"type":"field_value","target":{"role":"textbox","name":"message"},"expected_value":"${message}","expected_path":null,"description":"Message field must contain the supplied message."}
   ],
   "outputs": {}
 }
