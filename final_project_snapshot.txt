@@ -1,0 +1,3706 @@
+
+======================================================================
+FILE: app/__init__.py
+======================================================================
+
+======================================================================
+FILE: app/agent.py
+======================================================================
+from enum import Enum
+
+from openai import OpenAI
+from pydantic import BaseModel, Field
+
+
+class ActionType(str, Enum):
+    """Actions available to the discovery agent."""
+
+    FILL = "fill"
+    CLICK = "click"
+    SELECT = "select"
+    EXTRACT = "extract"
+    WAIT = "wait"
+    COMPLETE = "complete"
+    ESCALATE = "escalate"
+
+
+class AgentAction(BaseModel):
+    """Structured action selected during a discovery step."""
+
+    action: ActionType
+    target_id: int | None = None
+    value: str | None = None
+    output_name: str | None = None
+    reason: str = Field(min_length=1)
+
+
+class GoalResult(BaseModel):
+    """Final result produced when the discovery goal terminates."""
+
+    completed: bool
+    reason: str
+    outputs: dict[str, str] = Field(default_factory=dict)
+
+
+def decide_action(
+    goal: str,
+    observation: str,
+) -> AgentAction:
+    """
+    Ask the LLM to choose the next structured action for the
+    discovery run.
+    """
+
+    client = OpenAI()
+
+    response = client.responses.parse(
+        model="gpt-5.4-mini",
+        input=[
+            {
+                "role": "system",
+                "content": (
+                    "You are a computer-use discovery agent. "
+                    "Your job is to accomplish the user's goal by "
+                    "interacting with the current application.\n\n"
+
+                    "Choose exactly one next action based only on "
+                    "the supplied observation.\n\n"
+
+                    "Rules:\n"
+                    "- Use only element IDs present in the observation.\n"
+                    "- Use FILL for textboxes.\n"
+                    "- Use CLICK for links and buttons.\n"
+                    "- Use SELECT for comboboxes.\n"
+                    "- Use EXTRACT when the goal requires reading a value.\n"
+                    "- For EXTRACT, set output_name exactly to the output "
+                    "name requested by the goal.\n"
+                    "- Complete required mutations before extraction. "
+                    "If the goal specifies a value for a field and the "
+                    "observation shows that field is empty or has the "
+                    "wrong value, use FILL before using EXTRACT.\n"
+                    "- Never use EXTRACT as a substitute for filling a "
+                    "required field.\n"
+                    "- After a required value has been filled, if the goal "
+                    "asks to extract that field, use EXTRACT on that field.\n"
+                    "- Once all requested interactions and extractions have "
+                    "been performed, use COMPLETE.\n"
+                    "- Use WAIT only when the page appears to be loading.\n"
+                    "- Use COMPLETE only when the goal has been achieved.\n"
+                    "- Use ESCALATE if you cannot safely determine what "
+                    "to do.\n"
+                    "- Never invent an element ID."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"GOAL:\n{goal}\n\n"
+                    f"CURRENT OBSERVATION:\n{observation}"
+                ),
+            },
+        ],
+        text_format=AgentAction,
+    )
+
+    return response.output_parsed
+
+
+if __name__ == "__main__":
+    observation = """
+TITLE: ParaBank | Welcome | Online Banking
+URL: https://parabank.parasoft.com/parabank/index.htm
+
+INTERACTIVE ELEMENTS:
+[9] textbox name="username" tag="input"
+[10] textbox name="password" tag="input"
+[11] button name="Log In" tag="input"
+"""
+
+    action = decide_action(
+        goal=(
+            "Enter the username demo_user into the "
+            "username field."
+        ),
+        observation=observation,
+    )
+
+    print(action)
+======================================================================
+FILE: app/artifact.py
+======================================================================
+from datetime import datetime, timezone
+from enum import Enum
+from typing import Any
+
+from pydantic import BaseModel, Field
+
+from app.agent import AgentAction
+
+
+ARTIFACT_VERSION = "1.3"
+
+
+class ValueType(str, Enum):
+    STRING = "string"
+    INTEGER = "integer"
+    NUMBER = "number"
+    BOOLEAN = "boolean"
+
+
+class SemanticTarget(BaseModel):
+    role: str
+    name: str
+
+
+class InputParameter(BaseModel):
+    name: str
+    type: ValueType
+    description: str
+    required: bool = True
+
+
+class OutputDefinition(BaseModel):
+    name: str
+    type: ValueType
+    description: str
+    required: bool = True
+
+
+class CheckpointType(str, Enum):
+    URL_PATH = "url_path"
+    FIELD_VALUE = "field_value"
+
+
+class SuccessCheckpoint(BaseModel):
+    type: CheckpointType
+    target: SemanticTarget | None = None
+    expected_value: str | None = None
+    expected_path: str | None = None
+    description: str = ""
+
+
+class ArtifactStep(BaseModel):
+    step_number: int = Field(ge=1)
+    url_before: str
+    action: AgentAction
+    target: SemanticTarget | None = None
+
+    # If present, replay obtains the action value from the
+    # invocation inputs instead of from a persisted literal.
+    input_ref: str | None = None
+
+    extracted_value: str | None = None
+
+
+class CapabilityArtifact(BaseModel):
+    version: str = ARTIFACT_VERSION
+    capability_name: str
+    goal: str
+    target_domain: str
+
+    created_at: datetime = Field(
+        default_factory=lambda: datetime.now(
+            timezone.utc
+        )
+    )
+
+    input_schema: list[InputParameter] = Field(
+        default_factory=list
+    )
+
+    output_schema: list[OutputDefinition] = Field(
+        default_factory=list
+    )
+
+    steps: list[ArtifactStep] = Field(
+        default_factory=list
+    )
+
+    success_checkpoints: list[
+        SuccessCheckpoint
+    ] = Field(
+        default_factory=list
+    )
+
+    outputs: dict[str, Any] = Field(
+        default_factory=dict
+    )
+
+    def add_step(
+        self,
+        step_number,
+        url_before,
+        action,
+        target=None,
+        input_ref=None,
+        extracted_value=None,
+    ):
+        self.steps.append(
+            ArtifactStep(
+                step_number=step_number,
+                url_before=url_before,
+                action=action,
+                target=target,
+                input_ref=input_ref,
+                extracted_value=extracted_value,
+            )
+        )
+
+    def add_input(
+        self,
+        name,
+        value_type,
+        description,
+        required=True,
+    ):
+        self.input_schema.append(
+            InputParameter(
+                name=name,
+                type=value_type,
+                description=description,
+                required=required,
+            )
+        )
+
+    def add_output(
+        self,
+        name,
+        value_type,
+        description,
+        required=True,
+    ):
+        self.output_schema.append(
+            OutputDefinition(
+                name=name,
+                type=value_type,
+                description=description,
+                required=required,
+            )
+        )
+
+    def add_checkpoint(
+        self,
+        checkpoint_type,
+        *,
+        target=None,
+        expected_value=None,
+        expected_path=None,
+        description="",
+    ):
+        self.success_checkpoints.append(
+            SuccessCheckpoint(
+                type=checkpoint_type,
+                target=target,
+                expected_value=expected_value,
+                expected_path=expected_path,
+                description=description,
+            )
+        )
+
+    def save(self, path):
+        with open(
+            path,
+            "w",
+            encoding="utf-8",
+        ) as file:
+            file.write(
+                self.model_dump_json(indent=2)
+            )
+======================================================================
+FILE: app/browser.py
+======================================================================
+import argparse
+from pathlib import Path
+
+from playwright.sync_api import sync_playwright
+
+from app.agent import ActionType, AgentAction, decide_action
+from app.artifact import (
+    CapabilityArtifact,
+    CheckpointType,
+    SemanticTarget,
+    ValueType,
+)
+from app.escalation import (
+    ErrorCategory,
+    create_handoff,
+)
+from app.guardrails import Guardrails
+from app.logger import RunLogger
+from app.surface import Observation, PlaywrightSurface
+
+
+TARGET_URL = "https://parabank.parasoft.com/parabank/index.htm"
+MAX_STEPS = 8
+MAX_ATTEMPTS = 16
+MAX_HANDOFFS = 2
+
+
+def get_semantic_target(
+    observation: Observation,
+    action: AgentAction,
+) -> SemanticTarget | None:
+    """
+    Convert the temporary element ID selected by the discovery
+    agent into stable semantic target information.
+    """
+
+    if action.target_id is None:
+        return None
+
+    for element in observation.elements:
+        if element.id == action.target_id:
+            return SemanticTarget(
+                role=element.role,
+                name=element.name,
+            )
+
+    raise ValueError(
+        f"Agent selected element {action.target_id}, "
+        "but it does not exist in the current observation."
+    )
+
+
+def execute_action(
+    surface: PlaywrightSurface,
+    guardrails: Guardrails,
+    action: AgentAction,
+    logger: RunLogger | None = None,
+    step_number: int | None = None,
+):
+    target = None
+
+    if action.target_id is not None:
+        element = surface.get_element(action.target_id)
+
+        target = SemanticTarget(
+            role=element.role,
+            name=element.name,
+        )
+
+    decision = guardrails.check(
+        action,
+        surface.page.url,
+        target,
+    )
+
+    if logger is not None:
+        logger.log(
+            "guardrail_decision",
+            step_number=step_number,
+            data={
+                "action": action.action.value,
+                "target_role": (
+                    target.role if target else None
+                ),
+                "target_name": (
+                    target.name if target else None
+                ),
+                "allowed": decision.allowed,
+                "reason": decision.reason,
+            },
+        )
+
+    print(
+        f"GUARDRAIL: allowed={decision.allowed} "
+        f"reason={decision.reason}"
+    )
+
+    if not decision.allowed:
+        raise PermissionError(decision.reason)
+
+    if action.action == ActionType.FILL:
+        if action.target_id is None or action.value is None:
+            raise ValueError(
+                "FILL requires target_id and value."
+            )
+
+        surface.fill(
+            action.target_id,
+            action.value,
+        )
+
+    elif action.action == ActionType.CLICK:
+        if action.target_id is None:
+            raise ValueError(
+                "CLICK requires target_id."
+            )
+
+        surface.click(action.target_id)
+
+    elif action.action == ActionType.SELECT:
+        if action.target_id is None or action.value is None:
+            raise ValueError(
+                "SELECT requires target_id and value."
+            )
+
+        surface.select_option(
+            action.target_id,
+            action.value,
+        )
+
+    elif action.action == ActionType.EXTRACT:
+        if action.target_id is None:
+            raise ValueError(
+                "EXTRACT requires target_id."
+            )
+
+        return surface.extract_text(
+            action.target_id
+        )
+
+    elif action.action == ActionType.WAIT:
+        surface.page.wait_for_timeout(1000)
+
+    else:
+        raise ValueError(
+            f"Unsupported discovery action: "
+            f"{action.action}"
+        )
+
+    return None
+
+
+def get_input_ref(
+    action: AgentAction,
+    target: SemanticTarget | None,
+) -> str | None:
+    """
+    Connect a discovered form action to the capability's
+    typed invocation input.
+
+    The live discovery action may contain an example value,
+    but the reusable artifact stores only the input reference.
+    """
+
+    if (
+        action.action != ActionType.FILL
+        or target is None
+    ):
+        return None
+
+    if target.role.casefold() != "textbox":
+        return None
+
+    input_mapping = {
+        "name": "name",
+        "email": "email",
+        "phone": "phone",
+        "message": "message",
+    }
+
+    normalized_name = target.name.strip().casefold()
+
+    return input_mapping.get(normalized_name)
+
+
+def sanitize_action_for_artifact(
+    action: AgentAction,
+    input_ref: str | None,
+) -> AgentAction:
+    """
+    Create the reusable recorded action.
+
+    When an action consumes an invocation input, do not
+    persist the concrete discovery value.
+    """
+
+    if input_ref is None:
+        return action.model_copy(deep=True)
+
+    return action.model_copy(
+        update={
+            "value": None,
+        },
+        deep=True,
+    )
+
+
+def perform_discovery_handoff(
+    *,
+    page,
+    logger: RunLogger,
+    screenshot_dir: Path,
+    step_number: int,
+    reason: str,
+    last_action: str | None,
+) -> None:
+    """
+    Pause discovery and transfer the same live browser session
+    to a human operator.
+
+    The human can modify the current UI directly. After the
+    operator signals completion, control returns to automation.
+    The caller then re-observes the live page before asking the
+    LLM for another decision.
+    """
+
+    handoff = create_handoff(
+        category=ErrorCategory.RECOVERABLE_ERROR,
+        reason=reason,
+        step_number=step_number,
+        current_url=page.url,
+        last_action=last_action,
+    )
+
+    before_path = (
+        screenshot_dir
+        / f"discovery_handoff_step_{step_number}_before.png"
+    )
+
+    after_path = (
+        screenshot_dir
+        / f"discovery_handoff_step_{step_number}_after.png"
+    )
+
+    page.screenshot(path=before_path)
+
+    logger.log(
+        "handoff_requested",
+        step_number=step_number,
+        data={
+            "category": ErrorCategory.RECOVERABLE_ERROR.value,
+            "reason": reason,
+            "current_url": page.url,
+            "before_screenshot": str(before_path),
+        },
+    )
+
+    logger.log(
+        "control_transferred_to_human",
+        step_number=step_number,
+        data={
+            "control_owner": "human",
+            "current_url": page.url,
+        },
+    )
+
+    print("\n" + "=" * 70)
+    print("HUMAN CONTROL — SAME LIVE BROWSER SESSION")
+    print("=" * 70)
+
+    print(
+        handoff.model_dump_json(
+            indent=2
+        )
+    )
+
+    print(
+        "\nAutomation is paused."
+        "\nUse the currently open browser window to perform "
+        "the required recovery."
+    )
+
+    input(
+        "\nWhen the browser is ready for automation to continue, "
+        "press Enter here..."
+    )
+
+    page.screenshot(path=after_path)
+
+    logger.log(
+        "human_action_recorded",
+        step_number=step_number,
+        data={
+            "after_screenshot": str(after_path),
+            "current_url": page.url,
+        },
+    )
+
+    logger.log(
+        "control_returned_to_automation",
+        step_number=step_number,
+        data={
+            "control_owner": "automation",
+            "current_url": page.url,
+        },
+    )
+
+    print("\nControl returned to automation.")
+    print(
+        "Discovery will re-observe the current live UI "
+        "before making another decision."
+    )
+
+
+capability_goal = (
+    "Navigate to the Contact Us page and fill out the "
+    "Customer Care form using the supplied name, email, "
+    "phone, and message inputs. Do not submit the form. "
+    "After filling all four fields, extract the Message field value "
+    "as output 'message_value'. Complete when all four fields have "
+    "been filled and the message value has been extracted."
+)
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Run LLM-driven capability discovery."
+    )
+
+    parser.add_argument(
+        "--target-url",
+        default=TARGET_URL,
+        help=(
+            "Target application URL for discovery. "
+            "Defaults to the ParaBank demo application."
+        ),
+    )
+
+    parser.add_argument(
+        "--goal",
+        default=None,
+        help=(
+            "Natural-language goal for the discovery agent. "
+            "If omitted, the ParaBank Customer Care demo goal is used."
+        ),
+    )
+
+    parser.add_argument(
+        "--demo-handoff-step",
+        type=int,
+        default=None,
+        help=(
+            "Optional evidence/demo mode. Before this discovery step, "
+            "transfer control of the same live browser session to a "
+            "human operator, then re-observe and continue."
+        ),
+    )
+
+    return parser.parse_args()
+
+
+def main():
+    args = parse_args()
+
+    evidence_dir = Path("evidence")
+    screenshot_dir = evidence_dir / "screenshots"
+    artifact_dir = evidence_dir / "artifacts"
+
+    screenshot_dir.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    artifact_dir.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    default_goal = (
+        "Navigate to the Contact Us page and fill out the Customer Care form "
+        "using Name 'Demo User', Email 'demo@example.com', Phone '555-0100', "
+        "and Message 'Automated test message'. "
+        "Do not submit the form. "
+        "After filling all four fields, extract the value from the Message "
+        "field using output_name 'message_value'. Complete only after the "
+        "value has been extracted."
+    )
+
+    goal = args.goal or default_goal
+    target_url = args.target_url
+
+    artifact = CapabilityArtifact(
+        capability_name="fill_customer_care_form",
+        goal=capability_goal,
+        target_domain="parabank.parasoft.com",
+    )
+
+    # --------------------------------------------------------------
+    # Capability contract: typed inputs
+    # --------------------------------------------------------------
+
+    artifact.add_input(
+        name="name",
+        value_type=ValueType.STRING,
+        description="Name to enter in the Customer Care form.",
+    )
+
+    artifact.add_input(
+        name="email",
+        value_type=ValueType.STRING,
+        description="Email address to enter in the Customer Care form.",
+    )
+
+    artifact.add_input(
+        name="phone",
+        value_type=ValueType.STRING,
+        description="Phone number to enter in the Customer Care form.",
+    )
+
+    artifact.add_input(
+        name="message",
+        value_type=ValueType.STRING,
+        description="Message to enter in the Customer Care form.",
+    )
+
+    # --------------------------------------------------------------
+    # Capability contract: typed outputs
+    # --------------------------------------------------------------
+
+    artifact.add_output(
+        name="message_value",
+        value_type=ValueType.STRING,
+        description=(
+            "Message value extracted from the filled Customer Care form."
+        ),
+    )
+
+    # --------------------------------------------------------------
+    # Capability contract: deterministic success checkpoints
+    # --------------------------------------------------------------
+
+    artifact.add_checkpoint(
+        CheckpointType.URL_PATH,
+        expected_path="/parabank/contact.htm",
+        description=(
+            "Replay must finish on the Customer Care page."
+        ),
+    )
+
+    artifact.add_checkpoint(
+        CheckpointType.FIELD_VALUE,
+        target=SemanticTarget(
+            role="textbox",
+            name="name",
+        ),
+        expected_value="${name}",
+        description=(
+            "Name field must contain the supplied name."
+        ),
+    )
+
+    artifact.add_checkpoint(
+        CheckpointType.FIELD_VALUE,
+        target=SemanticTarget(
+            role="textbox",
+            name="email",
+        ),
+        expected_value="${email}",
+        description=(
+            "Email field must contain the supplied email."
+        ),
+    )
+
+    artifact.add_checkpoint(
+        CheckpointType.FIELD_VALUE,
+        target=SemanticTarget(
+            role="textbox",
+            name="phone",
+        ),
+        expected_value="${phone}",
+        description=(
+            "Phone field must contain the supplied phone number."
+        ),
+    )
+
+    artifact.add_checkpoint(
+        CheckpointType.FIELD_VALUE,
+        target=SemanticTarget(
+            role="textbox",
+            name="message",
+        ),
+        expected_value="${message}",
+        description=(
+            "Message field must contain the supplied message."
+        ),
+    )
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(
+            headless=False
+        )
+
+        page = browser.new_page(
+            viewport={
+                "width": 1280,
+                "height": 800,
+            }
+        )
+
+        print(f"Opening: {target_url}")
+
+        page.goto(
+            target_url,
+            wait_until="domcontentloaded",
+            timeout=30_000,
+        )
+
+        surface = PlaywrightSurface(page)
+
+        guardrails = Guardrails(
+            allowed_domains={
+                "parabank.parasoft.com"
+            },
+            allowed_routes={
+                "/parabank/index.htm",
+                "/parabank/contact.htm",
+            },
+            allowed_actions={
+                ActionType.FILL,
+                ActionType.CLICK,
+                ActionType.SELECT,
+                ActionType.EXTRACT,
+                ActionType.WAIT,
+            },
+            blocked_targets={
+                ("button", "Send to Customer Care"),
+            },
+        )
+
+        logger = RunLogger(
+            phase="discovery",
+        )
+
+        logger.log(
+            "run_started",
+            data={
+                "capability_name": artifact.capability_name,
+                "target_url": target_url,
+                "max_steps": MAX_STEPS,
+                "max_attempts": MAX_ATTEMPTS,
+                "max_handoffs": MAX_HANDOFFS,
+            },
+        )
+
+        print(f"Run log: {logger.path}")
+
+        print("\n" + "=" * 70)
+        print("DISCOVERY GOAL")
+        print("=" * 70)
+        print(goal)
+
+        completed = False
+        hard_failure = False
+        demo_handoff_used = False
+
+        step_number = 1
+        attempt_count = 0
+        handoff_count = 0
+        stop_reason = None
+
+        # Track non-UI discovery state so EXTRACT is not repeated forever.
+        collected_outputs: dict[str, str] = {}
+
+        while step_number <= MAX_STEPS:
+            attempt_count += 1
+
+            if attempt_count > MAX_ATTEMPTS:
+                stop_reason = (
+                    f"Discovery exceeded the maximum attempt limit "
+                    f"of {MAX_ATTEMPTS} without completing the goal."
+                )
+
+                logger.log(
+                    "attempt_limit_reached",
+                    step_number=step_number,
+                    data={
+                        "attempt_count": attempt_count,
+                        "max_attempts": MAX_ATTEMPTS,
+                        "reason": stop_reason,
+                    },
+                )
+
+                print(f"\nSTOPPING: {stop_reason}")
+                break
+
+            print("\n" + "=" * 70)
+            print(
+                f"DISCOVERY STEP {step_number}"
+            )
+            print("=" * 70)
+
+            if (
+                args.demo_handoff_step == step_number
+                and not demo_handoff_used
+            ):
+                perform_discovery_handoff(
+                    page=page,
+                    logger=logger,
+                    screenshot_dir=screenshot_dir,
+                    step_number=step_number,
+                    reason=(
+                        "Controlled discovery handoff requested "
+                        "for evidence/demo testing."
+                    ),
+                    last_action=None,
+                )
+
+                demo_handoff_used = True
+
+                logger.log(
+                    "automation_resumed",
+                    step_number=step_number,
+                    data={
+                        "reobserve_required": True,
+                        "demo_handoff": True,
+                    },
+                )
+
+                print(
+                    "\nAutomation is re-observing the UI "
+                    "after human control."
+                )
+
+            observation = surface.observe()
+
+            formatted_observation = (
+                surface.format_observation(
+                    observation
+                )
+            )
+
+            print("\nOBSERVATION")
+            print("-" * 70)
+            print(formatted_observation)
+
+            page.screenshot(
+                path=(
+                    screenshot_dir
+                    / f"discovery_step_{step_number}.png"
+                )
+            )
+
+            completed_outputs = (
+                ", ".join(sorted(collected_outputs))
+                if collected_outputs
+                else "none"
+            )
+
+            decision_observation = (
+                f"{formatted_observation}\n\n"
+                "DISCOVERY STATE:\n"
+                f"Already collected outputs: {completed_outputs}\n"
+                "Do not extract an output again if it is listed above. "
+                "If all requested UI actions are complete and every requested "
+                "output has already been collected, choose COMPLETE."
+            )
+
+            action = decide_action(
+                goal=goal,
+                observation=decision_observation,
+            )
+
+            logger.log(
+                "action_selected",
+                step_number=step_number,
+                data={
+                    "action": action.action.value,
+                    "target_id": action.target_id,
+                    "output_name": action.output_name,
+                    "reason": action.reason,
+                },
+            )
+
+            print("\nLLM DECISION")
+            print("-" * 70)
+            print(action)
+
+            if action.action == ActionType.COMPLETE:
+                logger.log(
+                    "run_completed",
+                    step_number=step_number,
+                    data={
+                        "reason": action.reason,
+                    },
+                )
+
+                print(
+                    "\nAgent reports that the goal "
+                    "has been completed."
+                )
+
+                completed = True
+                break
+
+            if action.action == ActionType.ESCALATE:
+                handoff_count += 1
+
+                if handoff_count > MAX_HANDOFFS:
+                    stop_reason = (
+                        f"Discovery exceeded the maximum human handoff "
+                        f"limit of {MAX_HANDOFFS}."
+                    )
+
+                    logger.log(
+                        "handoff_limit_reached",
+                        step_number=step_number,
+                        data={
+                            "handoff_count": handoff_count,
+                            "max_handoffs": MAX_HANDOFFS,
+                            "reason": stop_reason,
+                        },
+                    )
+
+                    print(f"\nSTOPPING: {stop_reason}")
+                    break
+
+                perform_discovery_handoff(
+                    page=page,
+                    logger=logger,
+                    screenshot_dir=screenshot_dir,
+                    step_number=step_number,
+                    reason=action.reason,
+                    last_action=str(action),
+                )
+
+                logger.log(
+                    "automation_resumed",
+                    step_number=step_number,
+                    data={
+                        "reobserve_required": True,
+                    },
+                )
+
+                # Do not increment the capability step.
+                # Re-observe the same live browser after human recovery.
+                continue
+
+            # Resolve the temporary numeric ID into semantic
+            # information BEFORE changing the page.
+            semantic_target = get_semantic_target(
+                observation=observation,
+                action=action,
+            )
+
+            if semantic_target is not None:
+                print(
+                    "\nSEMANTIC TARGET"
+                )
+                print("-" * 70)
+                print(
+                    f"role={semantic_target.role!r} "
+                    f"name={semantic_target.name!r}"
+                )
+
+            url_before = page.url
+
+            try:
+                extracted_value = execute_action(
+                    surface=surface,
+                    guardrails=guardrails,
+                    action=action,
+                    logger=logger,
+                    step_number=step_number,
+                )
+
+                if action.action == ActionType.EXTRACT:
+                    if not action.output_name:
+                        raise ValueError(
+                            "EXTRACT requires output_name."
+                        )
+
+                    declared_output_names = {
+                        output.name for output in artifact.output_schema
+                    }
+
+                    if action.output_name not in declared_output_names:
+                        raise ValueError(
+                            f"EXTRACT output_name {action.output_name!r} is not "
+                            "declared in the capability output schema."
+                        )
+
+                    collected_outputs[action.output_name] = (
+                        "" if extracted_value is None else str(extracted_value)
+                    )
+
+                logger.log(
+                    "action_succeeded",
+                    step_number=step_number,
+                    data={
+                        "action": action.action.value,
+                        "output_name": action.output_name,
+                    },
+                )
+
+            except PermissionError as error:
+                logger.log(
+                    "action_failed",
+                    step_number=step_number,
+                    data={
+                        "action": action.action.value,
+                        "error_type": type(error).__name__,
+                        "category": ErrorCategory.HARD_FAILURE.value,
+                        "error": str(error),
+                    },
+                )
+
+                handoff = create_handoff(
+                    category=ErrorCategory.HARD_FAILURE,
+                    reason=str(error),
+                    step_number=step_number,
+                    current_url=page.url,
+                    last_action=str(action),
+                )
+
+                logger.log(
+                    "hard_failure",
+                    step_number=step_number,
+                    data={
+                        "category": ErrorCategory.HARD_FAILURE.value,
+                        "reason": str(error),
+                    },
+                )
+
+                print("\nHARD FAILURE")
+                print("-" * 70)
+                print(
+                    handoff.model_dump_json(
+                        indent=2
+                    )
+                )
+
+                print(
+                    "\nAutomation will not transfer control "
+                    "to bypass a guardrail."
+                )
+
+                hard_failure = True
+                break
+
+            except Exception as error:
+                logger.log(
+                    "action_failed",
+                    step_number=step_number,
+                    data={
+                        "action": action.action.value,
+                        "error_type": type(error).__name__,
+                        "category": (
+                            ErrorCategory
+                            .RECOVERABLE_ERROR
+                            .value
+                        ),
+                        "error": str(error),
+                    },
+                )
+
+                handoff_count += 1
+
+                if handoff_count > MAX_HANDOFFS:
+                    stop_reason = (
+                        f"Discovery exceeded the maximum human handoff "
+                        f"limit of {MAX_HANDOFFS}."
+                    )
+
+                    logger.log(
+                        "handoff_limit_reached",
+                        step_number=step_number,
+                        data={
+                            "handoff_count": handoff_count,
+                            "max_handoffs": MAX_HANDOFFS,
+                            "reason": stop_reason,
+                        },
+                    )
+
+                    print(f"\nSTOPPING: {stop_reason}")
+                    break
+
+                perform_discovery_handoff(
+                    page=page,
+                    logger=logger,
+                    screenshot_dir=screenshot_dir,
+                    step_number=step_number,
+                    reason=str(error),
+                    last_action=str(action),
+                )
+
+                logger.log(
+                    "automation_resumed",
+                    step_number=step_number,
+                    data={
+                        "reobserve_required": True,
+                    },
+                )
+
+                # The failed action is not recorded in the artifact.
+                # Re-observe after the human recovery.
+                continue
+
+            input_ref = get_input_ref(
+                action=action,
+                target=semantic_target,
+            )
+
+            recorded_action = sanitize_action_for_artifact(
+                action=action,
+                input_ref=input_ref,
+            )
+
+            artifact.add_step(
+                step_number=step_number,
+                url_before=url_before,
+                action=recorded_action,
+                target=semantic_target,
+                input_ref=input_ref,
+                extracted_value=extracted_value,
+            )
+
+            print(
+                "\nAction executed and "
+                "recorded successfully."
+            )
+
+            page.wait_for_timeout(500)
+
+            step_number += 1
+
+        if completed:
+            artifact_path = (
+                artifact_dir
+                / "fill_customer_care_form.json"
+            )
+
+            artifact.save(
+                str(artifact_path)
+            )
+
+            print("\n" + "=" * 70)
+            print("DISCOVERY COMPLETE")
+            print("=" * 70)
+
+            print(
+                f"Artifact saved to: "
+                f"{artifact_path}"
+            )
+
+            page.screenshot(
+                path=(
+                    screenshot_dir
+                    / "discovery_complete.png"
+                )
+            )
+
+        else:
+            if not hard_failure:
+                reason = stop_reason or (
+                    f"Discovery reached the maximum "
+                    f"step limit of {MAX_STEPS} "
+                    "without completing the goal."
+                )
+
+                handoff = create_handoff(
+                    category=ErrorCategory.RECOVERABLE_ERROR,
+                    reason=reason,
+                    step_number=step_number,
+                    current_url=page.url,
+                    last_action=None,
+                )
+
+                logger.log(
+                    "human_handoff",
+                    step_number=step_number,
+                    data={
+                        "category": (
+                            ErrorCategory
+                            .RECOVERABLE_ERROR
+                            .value
+                        ),
+                        "reason": reason,
+                    },
+                )
+
+                print("\nHUMAN HANDOFF")
+                print("-" * 70)
+                print(
+                    handoff.model_dump_json(
+                        indent=2
+                    )
+                )
+
+            print("\n" + "=" * 70)
+            print("DISCOVERY DID NOT COMPLETE")
+            print("=" * 70)
+
+            print(
+                "No reusable artifact was saved."
+            )
+
+        input(
+            "\nPress Enter to close browser..."
+        )
+
+        browser.close()
+
+
+if __name__ == "__main__":
+    main()
+======================================================================
+FILE: app/error_demo.py
+======================================================================
+from app.escalation import (
+    BusinessOutcome,
+    ErrorCategory,
+    HardAutomationFailure,
+    RecoverableAutomationError,
+    create_handoff,
+)
+
+
+def demonstrate_error(error):
+    print("\n" + "=" * 70)
+    print(f"ERROR CATEGORY: {error.category.value}")
+    print("=" * 70)
+    print(f"Reason: {error.reason}")
+
+    handoff = create_handoff(
+        category=error.category,
+        reason=error.reason,
+        step_number=2,
+        current_url=(
+            "https://parabank.parasoft.com/"
+            "parabank/contact.htm"
+        ),
+        last_action="demo_action",
+    )
+
+    print("\nHUMAN HANDOFF")
+    print(handoff.model_dump_json(indent=2))
+
+
+def main():
+    examples = [
+        BusinessOutcome(
+            "The application completed normally, "
+            "but the requested business result was not available."
+        ),
+        RecoverableAutomationError(
+            "The expected semantic target could not be found "
+            "after the UI changed."
+        ),
+        HardAutomationFailure(
+            "Execution was blocked because the current domain "
+            "is outside the configured allowlist."
+        ),
+    ]
+
+    for error in examples:
+        demonstrate_error(error)
+
+
+if __name__ == "__main__":
+    main()
+======================================================================
+FILE: app/escalation.py
+======================================================================
+from enum import Enum
+
+from pydantic import BaseModel, Field
+
+
+class ErrorCategory(str, Enum):
+    """
+    Explicit failure taxonomy used by discovery and replay.
+    """
+
+    BUSINESS_OUTCOME = "business_outcome"
+    RECOVERABLE_ERROR = "recoverable_error"
+    HARD_FAILURE = "hard_failure"
+
+
+class HandoffRequest(BaseModel):
+    """
+    Structured context provided when automation cannot safely continue.
+
+    The request describes why control is being transferred. The replay
+    layer is responsible for pausing automation while preserving the
+    same live browser session and for recording control transitions.
+    """
+
+    category: ErrorCategory
+    reason: str = Field(min_length=1)
+
+    step_number: int | None = None
+    current_url: str | None = None
+    last_action: str | None = None
+
+    suggested_human_action: str = Field(min_length=1)
+
+
+class AutomationError(Exception):
+    """
+    Base exception carrying a classified automation failure.
+    """
+
+    def __init__(
+        self,
+        category: ErrorCategory,
+        reason: str,
+    ):
+        super().__init__(reason)
+
+        self.category = category
+        self.reason = reason
+
+
+class RecoverableAutomationError(AutomationError):
+    def __init__(self, reason: str):
+        super().__init__(
+            ErrorCategory.RECOVERABLE_ERROR,
+            reason,
+        )
+
+
+class HardAutomationFailure(AutomationError):
+    def __init__(self, reason: str):
+        super().__init__(
+            ErrorCategory.HARD_FAILURE,
+            reason,
+        )
+
+
+class BusinessOutcome(AutomationError):
+    """
+    Expected business-level outcome rather than an infrastructure failure.
+
+    Example:
+        "No eligible accounts are available."
+    """
+
+    def __init__(self, reason: str):
+        super().__init__(
+            ErrorCategory.BUSINESS_OUTCOME,
+            reason,
+        )
+
+
+def create_handoff(
+    category: ErrorCategory,
+    reason: str,
+    step_number: int | None = None,
+    current_url: str | None = None,
+    last_action: str | None = None,
+) -> HandoffRequest:
+    """
+    Produce structured context for a human operator.
+    """
+
+    if category == ErrorCategory.RECOVERABLE_ERROR:
+        suggested_action = (
+            "Review the current UI state, perform the requested "
+            "manual recovery in the existing browser session, and "
+            "return control when the UI is ready for automation."
+        )
+
+    elif category == ErrorCategory.BUSINESS_OUTCOME:
+        suggested_action = (
+            "Review the business outcome and decide whether "
+            "a different workflow or user input is required."
+        )
+
+    else:
+        suggested_action = (
+            "Inspect the failure and current UI before "
+            "continuing manually."
+        )
+
+    return HandoffRequest(
+        category=category,
+        reason=reason,
+        step_number=step_number,
+        current_url=current_url,
+        last_action=last_action,
+        suggested_human_action=suggested_action,
+    )
+
+======================================================================
+FILE: app/guardrails.py
+======================================================================
+from dataclasses import dataclass
+from urllib.parse import urlparse
+
+from app.agent import ActionType, AgentAction
+from app.artifact import SemanticTarget
+
+
+@dataclass
+class GuardrailDecision:
+    allowed: bool
+    reason: str
+
+
+class Guardrails:
+    def __init__(
+        self,
+        allowed_domains: set[str],
+        allowed_actions: set[ActionType],
+        allowed_routes: set[str] | None = None,
+        blocked_targets: set[tuple[str, str]] | None = None,
+    ):
+        self.allowed_domains = allowed_domains
+        self.allowed_actions = allowed_actions
+        self.allowed_routes = allowed_routes or set()
+        self.blocked_targets = blocked_targets or set()
+
+    def check(
+        self,
+        action: AgentAction,
+        current_url: str,
+        target: SemanticTarget | None = None,
+    ) -> GuardrailDecision:
+        if action.action in {
+            ActionType.COMPLETE,
+            ActionType.ESCALATE,
+        }:
+            return GuardrailDecision(
+                allowed=True,
+                reason=(
+                    "Control action does not modify "
+                    "the computer surface."
+                ),
+            )
+
+        parsed = urlparse(current_url)
+        domain = parsed.hostname
+
+        if domain not in self.allowed_domains:
+            return GuardrailDecision(
+                allowed=False,
+                reason=(
+                    f"Domain '{domain}' "
+                    "is not allowlisted."
+                ),
+            )
+
+        route = parsed.path
+
+        if ";jsessionid=" in route:
+            route = route.split(
+                ";jsessionid=",
+                1,
+            )[0]
+
+        if (
+            self.allowed_routes
+            and route not in self.allowed_routes
+        ):
+            return GuardrailDecision(
+                allowed=False,
+                reason=(
+                    f"Route '{route}' "
+                    "is not allowlisted."
+                ),
+            )
+
+        if action.action not in self.allowed_actions:
+            return GuardrailDecision(
+                allowed=False,
+                reason=(
+                    f"Action '{action.action.value}' "
+                    "is not allowed."
+                ),
+            )
+
+        if target is not None:
+            target_key = (
+                target.role,
+                target.name,
+            )
+
+            if target_key in self.blocked_targets:
+                return GuardrailDecision(
+                    allowed=False,
+                    reason=(
+                        "Target is explicitly blocked: "
+                        f'role="{target.role}", '
+                        f'name="{target.name}".'
+                    ),
+                )
+
+        return GuardrailDecision(
+            allowed=True,
+            reason="Action passed guardrail checks.",
+        )
+======================================================================
+FILE: app/logger.py
+======================================================================
+import json
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+
+class RunLogger:
+    def __init__(
+        self,
+        phase: str,
+        log_dir: str = "evidence/logs",
+    ):
+        self.run_id = str(uuid.uuid4())
+        self.phase = phase
+
+        directory = Path(log_dir)
+        directory.mkdir(parents=True, exist_ok=True)
+
+        self.path = directory / f"{phase}_{self.run_id}.jsonl"
+
+    def log(
+        self,
+        event: str,
+        *,
+        step_number: int | None = None,
+        data: dict[str, Any] | None = None,
+    ) -> None:
+        record = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "run_id": self.run_id,
+            "phase": self.phase,
+            "event": event,
+            "step_number": step_number,
+            "data": data or {},
+        }
+
+        with self.path.open(
+            "a",
+            encoding="utf-8",
+        ) as file:
+            file.write(
+                json.dumps(
+                    record,
+                    ensure_ascii=False,
+                    default=str,
+                )
+                + "\n"
+            )
+======================================================================
+FILE: app/main.py
+======================================================================
+
+======================================================================
+FILE: app/replay.py
+======================================================================
+import argparse
+from enum import Enum
+from pathlib import Path
+from typing import Any
+from urllib.parse import urlparse
+
+from playwright.sync_api import sync_playwright
+from pydantic import BaseModel, Field
+
+from app.agent import ActionType
+from app.artifact import (
+    ARTIFACT_VERSION,
+    CapabilityArtifact,
+    CheckpointType,
+    SemanticTarget,
+    ValueType,
+)
+from app.escalation import (
+    ErrorCategory,
+    HardAutomationFailure,
+    RecoverableAutomationError,
+    create_handoff,
+)
+from app.guardrails import Guardrails
+from app.logger import RunLogger
+from app.surface import (
+    PlaywrightSurface,
+    normalize_semantic_text,
+)
+
+
+ARTIFACT_PATH = Path(
+    "evidence/artifacts/fill_customer_care_form.json"
+)
+
+TARGET_URL = (
+    "https://parabank.parasoft.com/parabank/index.htm"
+)
+
+
+class ReplayStatus(str, Enum):
+    SUCCESS = "success"
+    BUSINESS_OUTCOME = "business_outcome"
+    FAILURE = "failure"
+
+
+class ReplayResult(BaseModel):
+    """
+    Structured result returned by deterministic replay.
+    """
+
+    status: ReplayStatus
+    capability_name: str
+    artifact_version: str
+
+    outputs: dict[str, Any] = Field(
+        default_factory=dict
+    )
+
+    error_category: ErrorCategory | None = None
+    failed_step: int | None = None
+    reason: str | None = None
+    expected: str | None = None
+    observed: str | None = None
+
+
+def parse_arguments() -> argparse.Namespace:
+    """
+    Parse per-invocation capability inputs.
+
+    These values are supplied by the caller and are not
+    permanently stored in the reusable artifact.
+    """
+
+    parser = argparse.ArgumentParser(
+        description=(
+            "Replay a saved capability deterministically "
+            "without using an LLM."
+        )
+    )
+
+    parser.add_argument(
+        "--name",
+        required=True,
+        help="Name to enter in the Customer Care form.",
+    )
+
+    parser.add_argument(
+        "--email",
+        required=True,
+        help="Email to enter in the Customer Care form.",
+    )
+
+    parser.add_argument(
+        "--phone",
+        required=True,
+        help="Phone number to enter in the Customer Care form.",
+    )
+
+    parser.add_argument(
+        "--message",
+        required=True,
+        help="Message to enter in the Customer Care form.",
+    )
+
+    parser.add_argument(
+        "--demo-handoff-step",
+        type=int,
+        default=None,
+        help=(
+            "Optional evidence/demo mode. Before this recorded step, "
+            "automation transfers control of the same live browser to "
+            "the human operator. The human performs that step manually, "
+            "then presses Enter so deterministic replay can resume."
+        ),
+    )
+
+    return parser.parse_args()
+
+
+def load_artifact() -> CapabilityArtifact:
+    """
+    Load and validate the saved reusable capability.
+    """
+
+    if not ARTIFACT_PATH.exists():
+        raise HardAutomationFailure(
+            f"Artifact not found: {ARTIFACT_PATH}"
+        )
+
+    artifact_json = ARTIFACT_PATH.read_text(
+        encoding="utf-8"
+    )
+
+    try:
+        artifact = (
+            CapabilityArtifact.model_validate_json(
+                artifact_json
+            )
+        )
+
+    except Exception as error:
+        raise HardAutomationFailure(
+            f"Artifact validation failed: {error}"
+        ) from error
+
+    if artifact.version != ARTIFACT_VERSION:
+        raise HardAutomationFailure(
+            "Unsupported artifact version: "
+            f"{artifact.version}. "
+            f"Expected {ARTIFACT_VERSION}."
+        )
+
+    return artifact
+
+
+def normalize_url(
+    url: str,
+) -> tuple[str, str]:
+    """
+    Normalize ParaBank session URLs so ephemeral jsessionid
+    values do not make deterministic replay fail.
+    """
+
+    parsed = urlparse(url)
+
+    path = parsed.path
+
+    if ";jsessionid=" in path:
+        path = path.split(
+            ";jsessionid=",
+            1,
+        )[0]
+
+    return parsed.hostname or "", path
+
+
+def validate_inputs(
+    artifact: CapabilityArtifact,
+    inputs: dict[str, Any],
+) -> None:
+    """
+    Validate invocation inputs against the artifact's typed
+    input contract.
+    """
+
+    declared_names = {
+        parameter.name
+        for parameter in artifact.input_schema
+    }
+
+    supplied_names = set(inputs)
+
+    unexpected = supplied_names - declared_names
+
+    if unexpected:
+        raise HardAutomationFailure(
+            "Unexpected input parameter(s): "
+            + ", ".join(sorted(unexpected))
+        )
+
+    for parameter in artifact.input_schema:
+        if parameter.required:
+            if parameter.name not in inputs:
+                raise HardAutomationFailure(
+                    "Missing required input parameter: "
+                    f"{parameter.name}"
+                )
+
+            if inputs[parameter.name] is None:
+                raise HardAutomationFailure(
+                    "Required input parameter is null: "
+                    f"{parameter.name}"
+                )
+
+        if parameter.name not in inputs:
+            continue
+
+        value = inputs[parameter.name]
+
+        if parameter.type == ValueType.STRING:
+            if not isinstance(value, str):
+                raise HardAutomationFailure(
+                    f"Input '{parameter.name}' must "
+                    "be a string."
+                )
+
+        elif parameter.type == ValueType.INTEGER:
+            if (
+                not isinstance(value, int)
+                or isinstance(value, bool)
+            ):
+                raise HardAutomationFailure(
+                    f"Input '{parameter.name}' must "
+                    "be an integer."
+                )
+
+        elif parameter.type == ValueType.NUMBER:
+            if (
+                not isinstance(value, (int, float))
+                or isinstance(value, bool)
+            ):
+                raise HardAutomationFailure(
+                    f"Input '{parameter.name}' must "
+                    "be a number."
+                )
+
+        elif parameter.type == ValueType.BOOLEAN:
+            if not isinstance(value, bool):
+                raise HardAutomationFailure(
+                    f"Input '{parameter.name}' must "
+                    "be a boolean."
+                )
+
+
+def resolve_parameter(
+    value: str | None,
+    inputs: dict[str, Any],
+) -> Any:
+    """
+    Resolve artifact references such as ${name} using
+    per-invocation inputs.
+
+    Literal values are returned unchanged for values that
+    are not parameterized.
+    """
+
+    if value is None:
+        return None
+
+    if (
+        isinstance(value, str)
+        and value.startswith("${")
+        and value.endswith("}")
+    ):
+        parameter_name = value[2:-1]
+
+        if parameter_name not in inputs:
+            raise HardAutomationFailure(
+                "Artifact references missing input "
+                f"parameter '{parameter_name}'."
+            )
+
+        return inputs[parameter_name]
+
+    return value
+
+
+def replay_value_for_action(
+    action,
+    input_ref: str | None,
+    inputs: dict[str, Any],
+) -> Any:
+    """
+    Determine the value used by a deterministic replay action.
+
+    Parameterized actions consume the invocation input explicitly
+    referenced by the saved artifact step. Literal action values
+    remain supported for non-parameterized actions.
+    """
+
+    if input_ref is not None:
+        if action.action not in {
+            ActionType.FILL,
+            ActionType.SELECT,
+        }:
+            raise HardAutomationFailure(
+                "Artifact input_ref is attached to an "
+                f"unsupported action type: {action.action.value}."
+            )
+
+        if input_ref not in inputs:
+            raise HardAutomationFailure(
+                "Artifact references missing invocation "
+                f"input '{input_ref}'."
+            )
+
+        return inputs[input_ref]
+
+    return resolve_parameter(
+        action.value,
+        inputs,
+    )
+
+
+def execute_replay_action(
+    surface: PlaywrightSurface,
+    guardrails: Guardrails,
+    action,
+    target: SemanticTarget | None,
+    input_ref: str | None,
+    inputs: dict[str, Any],
+):
+    """
+    Replay one recorded action deterministically.
+    """
+
+    decision = guardrails.check(
+        action,
+        surface.page.url,
+        target,
+    )
+
+    print(
+        f"GUARDRAIL: allowed={decision.allowed} "
+        f"reason={decision.reason}"
+    )
+
+    if not decision.allowed:
+        raise HardAutomationFailure(
+            decision.reason
+        )
+
+    if action.action == ActionType.WAIT:
+        surface.page.wait_for_timeout(1000)
+        return None
+
+    if target is None:
+        raise HardAutomationFailure(
+            "Recorded action requires a semantic target."
+        )
+
+    print(
+        f"Resolving semantic target: "
+        f"role={target.role!r}, "
+        f"name={target.name!r}"
+    )
+
+    try:
+        if action.action == ActionType.CLICK:
+            surface.click_semantic(
+                target.role,
+                target.name,
+            )
+
+        elif action.action == ActionType.FILL:
+            value = replay_value_for_action(
+                action,
+                input_ref,
+                inputs,
+            )
+
+            if value is None:
+                raise HardAutomationFailure(
+                    "Recorded FILL action has no value."
+                )
+
+            surface.fill_semantic(
+                target.role,
+                target.name,
+                str(value),
+            )
+
+        elif action.action == ActionType.SELECT:
+            value = replay_value_for_action(
+                action,
+                input_ref,
+                inputs,
+            )
+
+            if value is None:
+                raise HardAutomationFailure(
+                    "Recorded SELECT action has no value."
+                )
+
+            surface.select_semantic(
+                target.role,
+                target.name,
+                str(value),
+            )
+
+        elif action.action == ActionType.EXTRACT:
+            return surface.extract_semantic(
+                target.role,
+                target.name,
+            )
+
+        else:
+            raise HardAutomationFailure(
+                f"Unsupported replay action: "
+                f"{action.action}"
+            )
+
+    except HardAutomationFailure:
+        raise
+
+    except ValueError as error:
+        raise RecoverableAutomationError(
+            str(error)
+        ) from error
+
+    return None
+
+
+def get_field_value(
+    surface: PlaywrightSurface,
+    target: SemanticTarget,
+) -> str:
+    """
+    Read the current value of a semantic form control.
+
+    Checkpoint verification deliberately observes the live
+    UI instead of assuming that a successful fill call means
+    the desired state was reached.
+    """
+
+    observation = surface.observe()
+
+    matches = [
+        element
+        for element in observation.elements
+        if (
+            normalize_semantic_text(element.role)
+            == normalize_semantic_text(target.role)
+            and normalize_semantic_text(element.name)
+            == normalize_semantic_text(target.name)
+        )
+    ]
+
+    if len(matches) == 0:
+        raise RecoverableAutomationError(
+            "Checkpoint target was not found: "
+            f"role={target.role!r}, "
+            f"name={target.name!r}."
+        )
+
+    if len(matches) > 1:
+        raise RecoverableAutomationError(
+            "Checkpoint target is ambiguous: "
+            f"role={target.role!r}, "
+            f"name={target.name!r}."
+        )
+
+    value = matches[0].value
+
+    if value is None:
+        return ""
+
+    return str(value)
+
+
+def verify_checkpoints(
+    artifact: CapabilityArtifact,
+    surface: PlaywrightSurface,
+    inputs: dict[str, Any],
+) -> None:
+    """
+    Verify the artifact's explicit success conditions against
+    the live application state.
+    """
+
+    if not artifact.success_checkpoints:
+        raise HardAutomationFailure(
+            "Artifact declares no success checkpoints."
+        )
+
+    print("\n" + "=" * 70)
+    print("VERIFYING SUCCESS CHECKPOINTS")
+    print("=" * 70)
+
+    for index, checkpoint in enumerate(
+        artifact.success_checkpoints,
+        start=1,
+    ):
+        print(
+            f"\nCheckpoint {index}: "
+            f"{checkpoint.description}"
+        )
+
+        if checkpoint.type == CheckpointType.URL_PATH:
+            if checkpoint.expected_path is None:
+                raise HardAutomationFailure(
+                    "URL checkpoint has no expected path."
+                )
+
+            _, observed_path = normalize_url(
+                surface.page.url
+            )
+
+            if observed_path != checkpoint.expected_path:
+                raise RecoverableAutomationError(
+                    "Success checkpoint failed. "
+                    f"Expected URL path "
+                    f"{checkpoint.expected_path!r}, "
+                    f"observed {observed_path!r}."
+                )
+
+            print(
+                "PASS: URL path = "
+                f"{observed_path!r}"
+            )
+
+        elif (
+            checkpoint.type
+            == CheckpointType.FIELD_VALUE
+        ):
+            if checkpoint.target is None:
+                raise HardAutomationFailure(
+                    "Field checkpoint has no target."
+                )
+
+            expected_value = resolve_parameter(
+                checkpoint.expected_value,
+                inputs,
+            )
+
+            if expected_value is None:
+                raise HardAutomationFailure(
+                    "Field checkpoint has no "
+                    "expected value."
+                )
+
+            observed_value = get_field_value(
+                surface,
+                checkpoint.target,
+            )
+
+            if observed_value != str(expected_value):
+                raise RecoverableAutomationError(
+                    "Success checkpoint failed for "
+                    f"role={checkpoint.target.role!r}, "
+                    f"name={checkpoint.target.name!r}. "
+                    "Observed value did not match "
+                    "the expected invocation value."
+                )
+
+            print(
+                "PASS: "
+                f"{checkpoint.target.name!r} "
+                "contains the expected value."
+            )
+
+        else:
+            raise HardAutomationFailure(
+                "Unsupported checkpoint type: "
+                f"{checkpoint.type}"
+            )
+
+
+def collect_outputs(
+    artifact: CapabilityArtifact,
+    extracted_outputs: dict[str, Any],
+) -> dict[str, Any]:
+    """
+    Return only outputs declared by the capability contract.
+    """
+
+    result: dict[str, Any] = {}
+
+    for output in artifact.output_schema:
+        if output.name not in extracted_outputs:
+            if output.required:
+                raise HardAutomationFailure(
+                    "Required declared output was not "
+                    f"produced: {output.name}"
+                )
+
+            continue
+
+        result[output.name] = (
+            extracted_outputs[output.name]
+        )
+
+    return result
+
+
+def print_result(
+    result: ReplayResult,
+) -> None:
+    print("\n" + "=" * 70)
+    print("STRUCTURED REPLAY RESULT")
+    print("=" * 70)
+    print(result.model_dump_json(indent=2))
+
+
+
+def describe_human_step(
+    step,
+    inputs: dict[str, Any],
+) -> str:
+    """
+    Build an operator instruction for a recorded step.
+
+    Invocation values may be displayed in the terminal for the
+    human operator, but they are deliberately not written to the
+    structured replay log.
+    """
+
+    action_name = step.action.action.value
+
+    if step.target is None:
+        return (
+            f"Perform the recorded {action_name!r} action "
+            "in the live browser."
+        )
+
+    target_description = (
+        f"role={step.target.role!r}, "
+        f"name={step.target.name!r}"
+    )
+
+    if step.action.action in {
+        ActionType.FILL,
+        ActionType.SELECT,
+    }:
+        value = replay_value_for_action(
+            step.action,
+            step.input_ref,
+            inputs,
+        )
+
+        return (
+            f"Manually {action_name} {target_description} "
+            f"using this invocation value: {value!r}"
+        )
+
+    if step.action.action == ActionType.CLICK:
+        return (
+            f"Manually click {target_description}."
+        )
+
+    if step.action.action == ActionType.EXTRACT:
+        return (
+            f"Manually inspect {target_description}. "
+            "When finished, return control to automation."
+        )
+
+    if step.action.action == ActionType.WAIT:
+        return (
+            "Wait until the page is ready, then return "
+            "control to automation."
+        )
+
+    return (
+        f"Perform the recorded {action_name!r} action on "
+        f"{target_description}."
+    )
+
+
+def perform_same_session_handoff(
+    *,
+    page,
+    logger: RunLogger,
+    replay_screenshot_dir: Path,
+    handoff,
+    step,
+    inputs: dict[str, Any],
+) -> None:
+    """
+    Transfer the existing live browser session to a human operator.
+
+    Playwright and the browser remain alive while automation blocks
+    on terminal input. The operator uses the already-open browser,
+    performs the requested recorded step manually, and presses Enter
+    to return control. Structured logs record ownership transitions
+    without persisting invocation values.
+    """
+
+    before_path = (
+        replay_screenshot_dir
+        / f"handoff_step_{step.step_number}_before.png"
+    )
+    after_path = (
+        replay_screenshot_dir
+        / f"handoff_step_{step.step_number}_after.png"
+    )
+
+    page.screenshot(path=before_path)
+
+    logger.log(
+        "handoff_requested",
+        step_number=step.step_number,
+        data={
+            "error_category": handoff.category.value,
+            "reason": handoff.reason,
+            "current_url": page.url,
+            "suggested_human_action": (
+                handoff.suggested_human_action
+            ),
+        },
+    )
+
+    logger.log(
+        "control_transferred_to_human",
+        step_number=step.step_number,
+        data={
+            "current_url": page.url,
+            "recorded_action": step.action.action.value,
+            "target_role": (
+                step.target.role
+                if step.target is not None
+                else None
+            ),
+            "target_name": (
+                step.target.name
+                if step.target is not None
+                else None
+            ),
+            "input_ref": step.input_ref,
+            "before_screenshot": str(before_path),
+        },
+    )
+
+    print("\n" + "=" * 70)
+    print("HUMAN CONTROL — SAME LIVE BROWSER SESSION")
+    print("=" * 70)
+    print(handoff.model_dump_json(indent=2))
+    print("\nOperator instruction:")
+    print(describe_human_step(step, inputs))
+    print(
+        "\nAutomation is PAUSED. Use the browser window that is "
+        "already open. Do not open a new browser/session."
+    )
+
+    input(
+        "\nWhen the manual action is complete, return here "
+        "and press Enter to give control back to automation..."
+    )
+
+    page.screenshot(path=after_path)
+
+    logger.log(
+        "human_action_recorded",
+        step_number=step.step_number,
+        data={
+            "recorded_action": step.action.action.value,
+            "target_role": (
+                step.target.role
+                if step.target is not None
+                else None
+            ),
+            "target_name": (
+                step.target.name
+                if step.target is not None
+                else None
+            ),
+            "input_ref": step.input_ref,
+            "after_screenshot": str(after_path),
+        },
+    )
+
+    logger.log(
+        "control_returned_to_automation",
+        step_number=step.step_number,
+        data={
+            "current_url": page.url,
+        },
+    )
+
+    print("\nControl returned to automation.")
+    print(f"Current URL: {page.url}")
+
+
+def verify_human_performed_step(
+    *,
+    surface: PlaywrightSurface,
+    step,
+    inputs: dict[str, Any],
+) -> None:
+    """
+    Verify observable state after a human performs a recorded step.
+
+    FILL actions are checked immediately. CLICK actions are verified
+    by the next step's URL precondition and final checkpoints.
+    """
+
+    if (
+        step.action.action == ActionType.FILL
+        and step.target is not None
+    ):
+        expected = replay_value_for_action(
+            step.action,
+            step.input_ref,
+            inputs,
+        )
+
+        observed = get_field_value(
+            surface,
+            step.target,
+        )
+
+        if observed != str(expected):
+            raise RecoverableAutomationError(
+                "Human handoff step did not produce the expected "
+                "field state. The supplied invocation value was "
+                "not observed in the target control."
+            )
+
+
+def main():
+    args = parse_arguments()
+
+    logger = RunLogger("replay")
+
+    print(f"Replay log: {logger.path}")
+
+    inputs = {
+        "name": args.name,
+        "email": args.email,
+        "phone": args.phone,
+        "message": args.message,
+    }
+
+    print("=" * 70)
+    print("DETERMINISTIC SEMANTIC REPLAY")
+    print("=" * 70)
+
+    try:
+        artifact = load_artifact()
+
+        validate_inputs(
+            artifact,
+            inputs,
+        )
+
+        if args.demo_handoff_step is not None:
+            recorded_step_numbers = {
+                step.step_number
+                for step in artifact.steps
+            }
+
+            if args.demo_handoff_step not in recorded_step_numbers:
+                raise HardAutomationFailure(
+                    "--demo-handoff-step must identify a recorded "
+                    f"artifact step. Available steps: "
+                    f"{sorted(recorded_step_numbers)}"
+                )
+
+        logger.log(
+            "run_started",
+            data={
+                "capability_name": artifact.capability_name,
+                "artifact_version": artifact.version,
+                "artifact_path": str(ARTIFACT_PATH),
+                "target_url": TARGET_URL,
+                "input_names": sorted(inputs.keys()),
+                "demo_handoff_step": args.demo_handoff_step,
+            },
+        )
+
+    except HardAutomationFailure as error:
+        logger.log(
+            "run_failed",
+            data={
+                "error_category": error.category.value,
+                "reason": error.reason,
+                "stage": "artifact_or_input_validation",
+            },
+        )
+        result = ReplayResult(
+            status=ReplayStatus.FAILURE,
+            capability_name="unknown",
+            artifact_version="unknown",
+            error_category=error.category,
+            reason=error.reason,
+        )
+
+        print_result(result)
+        return
+
+    print(
+        f"Capability: {artifact.capability_name}"
+    )
+    print(f"Version: {artifact.version}")
+    print(f"Goal: {artifact.goal}")
+    print(
+        f"Recorded steps: {len(artifact.steps)}"
+    )
+
+    replay_screenshot_dir = Path(
+        "evidence/replay"
+    )
+
+    replay_screenshot_dir.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    guardrails = Guardrails(
+        allowed_domains={
+            "parabank.parasoft.com"
+        },
+
+        allowed_routes={
+            "/parabank/index.htm",
+            "/parabank/contact.htm",
+        },
+        allowed_actions={
+            ActionType.CLICK,
+            ActionType.FILL,
+            ActionType.SELECT,
+            ActionType.EXTRACT,
+            ActionType.WAIT,
+        },
+        blocked_targets={
+            ("button", "Send to Customer Care"),
+        },
+    )
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(
+            headless=False
+        )
+
+        page = browser.new_page(
+            viewport={
+                "width": 1280,
+                "height": 800,
+            }
+        )
+
+        print(f"\nOpening: {TARGET_URL}")
+
+        try:
+            page.goto(
+                TARGET_URL,
+                wait_until="domcontentloaded",
+                timeout=30_000,
+            )
+
+        except Exception as error:
+            failure = HardAutomationFailure(
+                f"Failed to load target application: "
+                f"{error}"
+            )
+
+            logger.log(
+                "run_failed",
+                data={
+                    "error_category": failure.category.value,
+                    "reason": failure.reason,
+                    "stage": "target_application_load",
+                },
+            )
+
+            result = ReplayResult(
+                status=ReplayStatus.FAILURE,
+                capability_name=(
+                    artifact.capability_name
+                ),
+                artifact_version=artifact.version,
+                error_category=failure.category,
+                reason=failure.reason,
+            )
+
+            print_result(result)
+            browser.close()
+            return
+
+        surface = PlaywrightSurface(page)
+
+        replay_completed = True
+        failed_result: ReplayResult | None = None
+
+        extracted_outputs: dict[str, Any] = {}
+
+        for step in artifact.steps:
+            print("\n" + "=" * 70)
+            print(
+                f"REPLAY STEP {step.step_number}"
+            )
+            print("=" * 70)
+
+            current_url = page.url
+
+            logger.log(
+                "step_started",
+                step_number=step.step_number,
+                data={
+                    "action": step.action.action.value,
+                    "target_role": (
+                        step.target.role
+                        if step.target is not None
+                        else None
+                    ),
+                    "target_name": (
+                        step.target.name
+                        if step.target is not None
+                        else None
+                    ),
+                    "input_ref": step.input_ref,
+                    "current_url": current_url,
+                },
+            )
+
+            if normalize_url(
+                current_url
+            ) != normalize_url(
+                step.url_before
+            ):
+                error = RecoverableAutomationError(
+                    "Replay URL precondition changed. "
+                    f"Expected route "
+                    f"{normalize_url(step.url_before)}, "
+                    f"but found "
+                    f"{normalize_url(current_url)}."
+                )
+
+                handoff = create_handoff(
+                    category=error.category,
+                    reason=error.reason,
+                    step_number=step.step_number,
+                    current_url=current_url,
+                    last_action=str(step.action),
+                )
+
+                print("\nHUMAN HANDOFF")
+                print("-" * 70)
+                print(
+                    handoff.model_dump_json(
+                        indent=2
+                    )
+                )
+
+                failed_result = ReplayResult(
+                    status=ReplayStatus.FAILURE,
+                    capability_name=(
+                        artifact.capability_name
+                    ),
+                    artifact_version=artifact.version,
+                    error_category=error.category,
+                    failed_step=step.step_number,
+                    reason=error.reason,
+                    expected=str(
+                        normalize_url(
+                            step.url_before
+                        )
+                    ),
+                    observed=str(
+                        normalize_url(
+                            current_url
+                        )
+                    ),
+                )
+
+                logger.log(
+                    "run_failed",
+                    step_number=step.step_number,
+                    data={
+                        "error_category": error.category.value,
+                        "reason": error.reason,
+                        "stage": "url_precondition",
+                        "expected": str(
+                            normalize_url(step.url_before)
+                        ),
+                        "observed": str(
+                            normalize_url(current_url)
+                        ),
+                    },
+                )
+
+                logger.log(
+                    "run_failed",
+                    step_number=step.step_number,
+                    data={
+                        "error_category": error.category.value,
+                        "reason": error.reason,
+                        "stage": "action_execution",
+                    },
+                )
+
+                replay_completed = False
+                break
+
+            if args.demo_handoff_step == step.step_number:
+                handoff = create_handoff(
+                    category=ErrorCategory.RECOVERABLE_ERROR,
+                    reason=(
+                        "Demonstration handoff requested so a human "
+                        "operator can perform this recorded step in "
+                        "the same live browser session."
+                    ),
+                    step_number=step.step_number,
+                    current_url=page.url,
+                    last_action=str(step.action),
+                )
+
+                try:
+                    perform_same_session_handoff(
+                        page=page,
+                        logger=logger,
+                        replay_screenshot_dir=replay_screenshot_dir,
+                        handoff=handoff,
+                        step=step,
+                        inputs=inputs,
+                    )
+
+                    verify_human_performed_step(
+                        surface=surface,
+                        step=step,
+                        inputs=inputs,
+                    )
+
+                    logger.log(
+                        "automation_resumed",
+                        step_number=step.step_number,
+                        data={
+                            "current_url": page.url,
+                            "resumed_after_human_step": True,
+                        },
+                    )
+
+                    logger.log(
+                        "step_completed",
+                        step_number=step.step_number,
+                        data={
+                            "action": step.action.action.value,
+                            "current_url": page.url,
+                            "performed_by": "human",
+                        },
+                    )
+
+                    print(
+                        "\nHuman-performed step verified. "
+                        "Deterministic automation is resuming."
+                    )
+                    continue
+
+                except RecoverableAutomationError as error:
+                    failed_result = ReplayResult(
+                        status=ReplayStatus.FAILURE,
+                        capability_name=artifact.capability_name,
+                        artifact_version=artifact.version,
+                        error_category=error.category,
+                        failed_step=step.step_number,
+                        reason=error.reason,
+                    )
+
+                    logger.log(
+                        "run_failed",
+                        step_number=step.step_number,
+                        data={
+                            "error_category": error.category.value,
+                            "reason": error.reason,
+                            "stage": "human_handoff_verification",
+                        },
+                    )
+
+                    replay_completed = False
+                    break
+
+            print("\nRECORDED ACTION")
+            print("-" * 70)
+            print(
+                f"action={step.action.action.value!r}"
+            )
+
+            print("\nRECORDED SEMANTIC TARGET")
+            print("-" * 70)
+            print(step.target)
+
+            try:
+                extracted_value = (
+                    execute_replay_action(
+                        surface=surface,
+                        guardrails=guardrails,
+                        action=step.action,
+                        target=step.target,
+                        input_ref=step.input_ref,
+                        inputs=inputs,
+                    )
+                )
+
+                if (
+                    step.action.action
+                    == ActionType.EXTRACT
+                    and step.action.output_name
+                    is not None
+                ):
+                    extracted_outputs[
+                        step.action.output_name
+                    ] = extracted_value
+
+            except (
+                RecoverableAutomationError,
+                HardAutomationFailure,
+            ) as error:
+                handoff = create_handoff(
+                    category=error.category,
+                    reason=error.reason,
+                    step_number=step.step_number,
+                    current_url=page.url,
+                    last_action=str(step.action),
+                )
+
+                print("\nHUMAN HANDOFF")
+                print("-" * 70)
+                print(
+                    handoff.model_dump_json(
+                        indent=2
+                    )
+                )
+
+                failed_result = ReplayResult(
+                    status=ReplayStatus.FAILURE,
+                    capability_name=(
+                        artifact.capability_name
+                    ),
+                    artifact_version=artifact.version,
+                    error_category=error.category,
+                    failed_step=step.step_number,
+                    reason=error.reason,
+                )
+
+                replay_completed = False
+                break
+
+            page.wait_for_timeout(500)
+
+            page.screenshot(
+                path=(
+                    replay_screenshot_dir
+                    / (
+                        "semantic_replay_step_"
+                        f"{step.step_number}.png"
+                    )
+                )
+            )
+
+            print(
+                "\nRecorded semantic action "
+                "replayed successfully."
+            )
+
+            logger.log(
+                "step_completed",
+                step_number=step.step_number,
+                data={
+                    "action": step.action.action.value,
+                    "current_url": page.url,
+                },
+            )
+
+        if replay_completed:
+            try:
+                verify_checkpoints(
+                    artifact,
+                    surface,
+                    inputs,
+                )
+
+                outputs = collect_outputs(
+                    artifact,
+                    extracted_outputs,
+                )
+
+                result = ReplayResult(
+                    status=ReplayStatus.SUCCESS,
+                    capability_name=(
+                        artifact.capability_name
+                    ),
+                    artifact_version=artifact.version,
+                    outputs=outputs,
+                    reason=(
+                        "All recorded actions and "
+                        "success checkpoints completed."
+                    ),
+                )
+
+                print("\n" + "=" * 70)
+                print("REPLAY COMPLETE")
+                print("=" * 70)
+
+                print(
+                    f"Final title: {page.title()}"
+                )
+
+                print(
+                    f"Final URL:   {page.url}"
+                )
+
+                page.screenshot(
+                    path=(
+                        replay_screenshot_dir
+                        / (
+                            "semantic_replay_"
+                            "complete.png"
+                        )
+                    )
+                )
+
+                print_result(result)
+
+                logger.log(
+                    "run_completed",
+                    data={
+                        "status": result.status.value,
+                        "capability_name": artifact.capability_name,
+                        "artifact_version": artifact.version,
+                        "checkpoint_count": len(
+                            artifact.success_checkpoints
+                        ),
+                        "output_names": sorted(
+                            result.outputs.keys()
+                        ),
+                        "final_url": page.url,
+                    },
+                )
+
+            except (
+                RecoverableAutomationError,
+                HardAutomationFailure,
+            ) as error:
+                page.screenshot(
+                    path=(
+                        replay_screenshot_dir
+                        / (
+                            "checkpoint_failure.png"
+                        )
+                    )
+                )
+
+                handoff = create_handoff(
+                    category=error.category,
+                    reason=error.reason,
+                    current_url=page.url,
+                    last_action=(
+                        "verify_success_checkpoints"
+                    ),
+                )
+
+                print("\nHUMAN HANDOFF")
+                print("-" * 70)
+                print(
+                    handoff.model_dump_json(
+                        indent=2
+                    )
+                )
+
+                result = ReplayResult(
+                    status=ReplayStatus.FAILURE,
+                    capability_name=(
+                        artifact.capability_name
+                    ),
+                    artifact_version=artifact.version,
+                    error_category=error.category,
+                    reason=error.reason,
+                )
+
+                print_result(result)
+
+                logger.log(
+                    "run_failed",
+                    data={
+                        "error_category": error.category.value,
+                        "reason": error.reason,
+                        "stage": "success_checkpoints",
+                        "current_url": page.url,
+                    },
+                )
+
+        elif failed_result is not None:
+            print_result(failed_result)
+
+        input(
+            "\nPress Enter to close browser..."
+        )
+
+        browser.close()
+
+
+if __name__ == "__main__":
+    main()
+======================================================================
+FILE: app/surface.py
+======================================================================
+from dataclasses import dataclass
+from typing import Any
+
+from playwright.sync_api import Page
+
+
+def normalize_semantic_text(value: str) -> str:
+    """
+    Normalize semantic identifiers for robust matching.
+
+    Case differences and insignificant whitespace should not
+    cause deterministic replay to fail.
+    """
+    return " ".join(
+        value.strip().casefold().split()
+    )
+
+
+@dataclass
+class UIElement:
+    id: int
+    tag: str
+    role: str
+    name: str
+    element_type: str | None = None
+    value: str | None = None
+
+
+@dataclass
+class Observation:
+    url: str
+    title: str
+    text: str
+    elements: list[UIElement]
+
+
+class PlaywrightSurface:
+    def __init__(self, page: Page):
+        self.page = page
+        self._elements: dict[int, Any] = {}
+
+    def observe(self) -> Observation:
+        self._elements.clear()
+
+        raw_elements = self.page.locator(
+            "input, button, a, select, textarea"
+        )
+
+        elements: list[UIElement] = []
+        next_id = 1
+
+        for index in range(raw_elements.count()):
+            locator = raw_elements.nth(index)
+
+            try:
+                if not locator.is_visible():
+                    continue
+
+                tag = locator.evaluate(
+                    "(el) => el.tagName.toLowerCase()"
+                )
+
+                element_type = locator.get_attribute("type")
+
+                role = self._infer_role(
+                    tag,
+                    element_type,
+                )
+
+                name = self._get_accessible_name(locator)
+
+                current_value = None
+
+                if role in {"textbox", "combobox"}:
+                    try:
+                        current_value = locator.input_value()
+                    except Exception:
+                        current_value = None
+
+                element = UIElement(
+                    id=next_id,
+                    tag=tag,
+                    role=role,
+                    name=name,
+                    element_type=element_type,
+                    value=current_value,
+                )
+
+                elements.append(element)
+                self._elements[next_id] = locator
+                next_id += 1
+
+            except Exception as error:
+                print(
+                    f"Skipping interactive element "
+                    f"{index}: {error}"
+                )
+
+        body_text = self.page.locator(
+            "body"
+        ).inner_text()[:5000]
+
+        return Observation(
+            url=self.page.url,
+            title=self.page.title(),
+            text=body_text,
+            elements=elements,
+        )
+
+    def get_element(
+        self,
+        element_id: int,
+    ) -> UIElement:
+        observation = self.observe()
+
+        for element in observation.elements:
+            if element.id == element_id:
+                return element
+
+        raise ValueError(
+            f"Element ID {element_id} "
+            "was not found in the current observation."
+        )
+
+    def resolve_semantic_target(
+        self,
+        role: str,
+        name: str,
+    ):
+        """
+        Resolve a recorded semantic target against the live UI.
+
+        Matching is case-insensitive and ignores insignificant
+        whitespace, while still requiring both role and name.
+        """
+
+        observation = self.observe()
+
+        normalized_role = normalize_semantic_text(role)
+        normalized_name = normalize_semantic_text(name)
+
+        matches = [
+            element
+            for element in observation.elements
+            if (
+                normalize_semantic_text(element.role)
+                == normalized_role
+                and normalize_semantic_text(element.name)
+                == normalized_name
+            )
+        ]
+
+        if not matches:
+            raise ValueError(
+                "Semantic target not found: "
+                f'role="{role}", name="{name}"'
+            )
+
+        if len(matches) > 1:
+            raise ValueError(
+                "Semantic target is ambiguous: "
+                f'role="{role}", name="{name}". '
+                f"Found {len(matches)} matches."
+            )
+
+        return self._resolve_element(
+            matches[0].id
+        )
+
+    def fill(
+        self,
+        element_id: int,
+        value: str,
+    ):
+        locator = self._resolve_element(
+            element_id
+        )
+        locator.fill(value)
+
+    def click(
+        self,
+        element_id: int,
+    ):
+        locator = self._resolve_element(
+            element_id
+        )
+        locator.click()
+
+    def select_option(
+        self,
+        element_id: int,
+        value: str,
+    ):
+        locator = self._resolve_element(
+            element_id
+        )
+        locator.select_option(value)
+
+    def extract_text(
+        self,
+        element_id: int,
+    ) -> str:
+        locator = self._resolve_element(
+            element_id
+        )
+
+        try:
+            return locator.input_value()
+        except Exception:
+            return locator.inner_text()
+
+    def click_semantic(
+        self,
+        role: str,
+        name: str,
+    ):
+        locator = self.resolve_semantic_target(
+            role,
+            name,
+        )
+        locator.click()
+
+    def fill_semantic(
+        self,
+        role: str,
+        name: str,
+        value: str,
+    ):
+        locator = self.resolve_semantic_target(
+            role,
+            name,
+        )
+        locator.fill(value)
+
+    def select_semantic(
+        self,
+        role: str,
+        name: str,
+        value: str,
+    ):
+        locator = self.resolve_semantic_target(
+            role,
+            name,
+        )
+        locator.select_option(value)
+
+    def extract_semantic(
+        self,
+        role: str,
+        name: str,
+    ) -> str:
+        locator = self.resolve_semantic_target(
+            role,
+            name,
+        )
+
+        try:
+            return locator.input_value()
+        except Exception:
+            return locator.inner_text()
+
+    def _get_accessible_name(
+        self,
+        locator,
+    ) -> str:
+        aria_label = locator.get_attribute(
+            "aria-label"
+        )
+
+        if aria_label:
+            return aria_label.strip()
+
+        placeholder = locator.get_attribute(
+            "placeholder"
+        )
+
+        if placeholder:
+            return placeholder.strip()
+
+        try:
+            inner_text = locator.inner_text().strip()
+
+            if inner_text:
+                return inner_text
+
+        except Exception:
+            pass
+
+        element_type = locator.get_attribute(
+            "type"
+        )
+
+        if element_type in {
+            "submit",
+            "button",
+        }:
+            value = locator.get_attribute(
+                "value"
+            )
+
+            if value:
+                return value.strip()
+
+        name = locator.get_attribute("name")
+
+        if name:
+            return name.strip()
+
+        return "(unnamed)"
+
+    @staticmethod
+    def _infer_role(
+        tag: str,
+        element_type: str | None,
+    ) -> str:
+        if tag == "a":
+            return "link"
+
+        if tag == "button":
+            return "button"
+
+        if tag == "select":
+            return "combobox"
+
+        if tag == "textarea":
+            return "textbox"
+
+        if tag == "input":
+            if element_type in {
+                "submit",
+                "button",
+            }:
+                return "button"
+
+            if element_type == "checkbox":
+                return "checkbox"
+
+            if element_type == "radio":
+                return "radio"
+
+            return "textbox"
+
+        return "unknown"
+
+    def _resolve_element(
+        self,
+        element_id: int,
+    ):
+        if element_id not in self._elements:
+            raise ValueError(
+                f"Element ID {element_id} "
+                "is not available in the current observation."
+            )
+
+        return self._elements[element_id]
+
+    @staticmethod
+    def format_observation(
+        observation: Observation,
+    ) -> str:
+        lines = [
+            f"TITLE: {observation.title}",
+            f"URL: {observation.url}",
+            "",
+            "INTERACTIVE ELEMENTS:",
+        ]
+
+        for element in observation.elements:
+            line = (
+                f"[{element.id}] "
+                f"{element.role} "
+                f'name="{element.name}" '
+                f'tag="{element.tag}"'
+            )
+
+            if element.value is not None:
+                line += (
+                    f' value="{element.value}"'
+                )
+
+            lines.append(line)
+
+        lines.extend(
+            [
+                "",
+                "VISIBLE PAGE TEXT:",
+                observation.text,
+            ]
+        )
+
+        return "\n".join(lines)
+======================================================================
+FILE: README.md
+======================================================================
+
+======================================================================
+FILE: REPORT.md
+======================================================================
+
+======================================================================
+FILE: requirements.txt
+======================================================================
+annotated-types==0.8.0
+anyio==4.15.1
+greenlet==3.5.5
+h11==0.16.0
+httpcore2==2.12.0
+httpx2==2.12.0
+idna==3.19
+jiter==0.16.0
+openai==3.9.0
+playwright==1.62.0
+pydantic==2.13.5
+pydantic_core==2.46.5
+pyee==13.0.1
+python-dotenv==1.2.3
+sniffio==1.3.1
+truststore==0.10.4
+typing-inspection==0.4.4
+typing_extensions==4.16.0
+
+======================================================================
+FILE: .gitignore
+======================================================================
+.venv/
+.env
+.env.*
+__pycache__/
+*.pyc
+.DS_Store
+
+======================================================================
+FILE: evidence/artifacts/fill_customer_care_form.json
+======================================================================
+{
+  "version": "1.3",
+  "capability_name": "fill_customer_care_form",
+  "goal": "Navigate to the Contact Us page and fill out the Customer Care form using the supplied name, email, phone, and message inputs. Do not submit the form. After filling all four fields, extract the Message field value as output 'message_value'. Complete when all four fields have been filled and the message value has been extracted.",
+  "target_domain": "parabank.parasoft.com",
+  "created_at": "2026-09-14T19:40:52.620608Z",
+  "input_schema": [
+    {
+      "name": "name",
+      "type": "string",
+      "description": "Name to enter in the Customer Care form.",
+      "required": true
+    },
+    {
+      "name": "email",
+      "type": "string",
+      "description": "Email address to enter in the Customer Care form.",
+      "required": true
+    },
+    {
+      "name": "phone",
+      "type": "string",
+      "description": "Phone number to enter in the Customer Care form.",
+      "required": true
+    },
+    {
+      "name": "message",
+      "type": "string",
+      "description": "Message to enter in the Customer Care form.",
+      "required": true
+    }
+  ],
+  "output_schema": [
+    {
+      "name": "message_value",
+      "type": "string",
+      "description": "Message value extracted from the filled Customer Care form.",
+      "required": true
+    }
+  ],
+  "steps": [
+    {
+      "step_number": 1,
+      "url_before": "https://parabank.parasoft.com/parabank/index.htm",
+      "action": {
+        "action": "click",
+        "target_id": 33,
+        "value": null,
+        "output_name": null,
+        "reason": "Navigate to the Contact Us page to access the Customer Care form."
+      },
+      "target": {
+        "role": "link",
+        "name": "Contact Us"
+      },
+      "input_ref": null,
+      "extracted_value": null
+    },
+    {
+      "step_number": 2,
+      "url_before": "https://parabank.parasoft.com/parabank/contact.htm;jsessionid=5EE129DBA26820C3B98A0EC6F1BE4B10",
+      "action": {
+        "action": "fill",
+        "target_id": 14,
+        "value": null,
+        "output_name": null,
+        "reason": "Fill the Customer Care Name field with the requested value as part of completing the form."
+      },
+      "target": {
+        "role": "textbox",
+        "name": "name"
+      },
+      "input_ref": "name",
+      "extracted_value": null
+    },
+    {
+      "step_number": 3,
+      "url_before": "https://parabank.parasoft.com/parabank/contact.htm;jsessionid=5EE129DBA26820C3B98A0EC6F1BE4B10",
+      "action": {
+        "action": "fill",
+        "target_id": 15,
+        "value": null,
+        "output_name": null,
+        "reason": "The Contact Us form needs the email field filled before extraction; it is currently empty."
+      },
+      "target": {
+        "role": "textbox",
+        "name": "email"
+      },
+      "input_ref": "email",
+      "extracted_value": null
+    },
+    {
+      "step_number": 4,
+      "url_before": "https://parabank.parasoft.com/parabank/contact.htm;jsessionid=5EE129DBA26820C3B98A0EC6F1BE4B10",
+      "action": {
+        "action": "fill",
+        "target_id": 16,
+        "value": null,
+        "output_name": null,
+        "reason": "The Name and Email fields are already filled; fill the remaining Phone field before extracting the Message value."
+      },
+      "target": {
+        "role": "textbox",
+        "name": "phone"
+      },
+      "input_ref": "phone",
+      "extracted_value": null
+    },
+    {
+      "step_number": 5,
+      "url_before": "https://parabank.parasoft.com/parabank/contact.htm;jsessionid=5EE129DBA26820C3B98A0EC6F1BE4B10",
+      "action": {
+        "action": "fill",
+        "target_id": 17,
+        "value": null,
+        "output_name": null,
+        "reason": "The Name, Email, and Phone fields are already filled correctly; the remaining required step is to fill the Message field before extracting its value."
+      },
+      "target": {
+        "role": "textbox",
+        "name": "message"
+      },
+      "input_ref": "message",
+      "extracted_value": null
+    },
+    {
+      "step_number": 6,
+      "url_before": "https://parabank.parasoft.com/parabank/contact.htm;jsessionid=5EE129DBA26820C3B98A0EC6F1BE4B10",
+      "action": {
+        "action": "extract",
+        "target_id": 17,
+        "value": null,
+        "output_name": "message_value",
+        "reason": "All requested fields are already filled; now extract the Message field value with the required output name before completing."
+      },
+      "target": {
+        "role": "textbox",
+        "name": "message"
+      },
+      "input_ref": null,
+      "extracted_value": "Automated test message"
+    }
+  ],
+  "success_checkpoints": [
+    {
+      "type": "url_path",
+      "target": null,
+      "expected_value": null,
+      "expected_path": "/parabank/contact.htm",
+      "description": "Replay must finish on the Customer Care page."
+    },
+    {
+      "type": "field_value",
+      "target": {
+        "role": "textbox",
+        "name": "name"
+      },
+      "expected_value": "${name}",
+      "expected_path": null,
+      "description": "Name field must contain the supplied name."
+    },
+    {
+      "type": "field_value",
+      "target": {
+        "role": "textbox",
+        "name": "email"
+      },
+      "expected_value": "${email}",
+      "expected_path": null,
+      "description": "Email field must contain the supplied email."
+    },
+    {
+      "type": "field_value",
+      "target": {
+        "role": "textbox",
+        "name": "phone"
+      },
+      "expected_value": "${phone}",
+      "expected_path": null,
+      "description": "Phone field must contain the supplied phone number."
+    },
+    {
+      "type": "field_value",
+      "target": {
+        "role": "textbox",
+        "name": "message"
+      },
+      "expected_value": "${message}",
+      "expected_path": null,
+      "description": "Message field must contain the supplied message."
+    }
+  ],
+  "outputs": {}
+}

@@ -316,7 +316,9 @@ capability_goal = (
     "Navigate to the Contact Us page and fill out the "
     "Customer Care form using the supplied name, email, "
     "phone, and message inputs. Do not submit the form. "
-    "Complete when all four fields have been filled."
+    "After filling all four fields, extract the Message field value "
+    "as output 'message_value'. Complete when all four fields have "
+    "been filled and the message value has been extracted."
 )
 
 
@@ -379,7 +381,9 @@ def main():
         "using Name 'Demo User', Email 'demo@example.com', Phone '555-0100', "
         "and Message 'Automated test message'. "
         "Do not submit the form. "
-        "Complete when all four fields have been filled."
+        "After filling all four fields, extract the value from the Message "
+        "field using output_name 'message_value'. Complete only after the "
+        "value has been extracted."
     )
 
     goal = args.goal or default_goal
@@ -422,12 +426,14 @@ def main():
     # --------------------------------------------------------------
     # Capability contract: typed outputs
     # --------------------------------------------------------------
-    #
-    # This capability intentionally does not submit the form and does
-    # not extract a business value. Therefore output_schema remains
-    # empty. Other capabilities can declare typed outputs with
-    # artifact.add_output(...).
-    # --------------------------------------------------------------
+
+    artifact.add_output(
+        name="message_value",
+        value_type=ValueType.STRING,
+        description=(
+            "Message value extracted from the filled Customer Care form."
+        ),
+    )
 
     # --------------------------------------------------------------
     # Capability contract: deterministic success checkpoints
@@ -562,6 +568,9 @@ def main():
         handoff_count = 0
         stop_reason = None
 
+        # Track non-UI discovery state so EXTRACT is not repeated forever.
+        collected_outputs: dict[str, str] = {}
+
         while step_number <= MAX_STEPS:
             attempt_count += 1
 
@@ -641,9 +650,24 @@ def main():
                 )
             )
 
+            completed_outputs = (
+                ", ".join(sorted(collected_outputs))
+                if collected_outputs
+                else "none"
+            )
+
+            decision_observation = (
+                f"{formatted_observation}\n\n"
+                "DISCOVERY STATE:\n"
+                f"Already collected outputs: {completed_outputs}\n"
+                "Do not extract an output again if it is listed above. "
+                "If all requested UI actions are complete and every requested "
+                "output has already been collected, choose COMPLETE."
+            )
+
             action = decide_action(
                 goal=goal,
-                observation=formatted_observation,
+                observation=decision_observation,
             )
 
             logger.log(
@@ -749,11 +773,32 @@ def main():
                     step_number=step_number,
                 )
 
+                if action.action == ActionType.EXTRACT:
+                    if not action.output_name:
+                        raise ValueError(
+                            "EXTRACT requires output_name."
+                        )
+
+                    declared_output_names = {
+                        output.name for output in artifact.output_schema
+                    }
+
+                    if action.output_name not in declared_output_names:
+                        raise ValueError(
+                            f"EXTRACT output_name {action.output_name!r} is not "
+                            "declared in the capability output schema."
+                        )
+
+                    collected_outputs[action.output_name] = (
+                        "" if extracted_value is None else str(extracted_value)
+                    )
+
                 logger.log(
                     "action_succeeded",
                     step_number=step_number,
                     data={
                         "action": action.action.value,
+                        "output_name": action.output_name,
                     },
                 )
 
@@ -876,7 +921,7 @@ def main():
                 action=recorded_action,
                 target=semantic_target,
                 input_ref=input_ref,
-                extracted_value=extracted_value,
+                extracted_value=None,
             )
 
             print(

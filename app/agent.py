@@ -33,13 +33,16 @@ class GoalResult(BaseModel):
     reason: str
     outputs: dict[str, str] = Field(default_factory=dict)
 
+
 def decide_action(
     goal: str,
     observation: str,
 ) -> AgentAction:
     """
-    Ask the LLM to choose the next structured action for the discovery run.
+    Ask the LLM to choose the next structured action for the
+    discovery run.
     """
+
     client = OpenAI()
 
     response = client.responses.parse(
@@ -49,19 +52,34 @@ def decide_action(
                 "role": "system",
                 "content": (
                     "You are a computer-use discovery agent. "
-                    "Your job is to accomplish the user's goal by interacting "
-                    "with the current application.\n\n"
-                    "Choose exactly one next action based only on the supplied "
-                    "observation.\n\n"
+                    "Your job is to accomplish the user's goal by "
+                    "interacting with the current application.\n\n"
+
+                    "Choose exactly one next action based only on "
+                    "the supplied observation.\n\n"
+
                     "Rules:\n"
                     "- Use only element IDs present in the observation.\n"
                     "- Use FILL for textboxes.\n"
                     "- Use CLICK for links and buttons.\n"
                     "- Use SELECT for comboboxes.\n"
                     "- Use EXTRACT when the goal requires reading a value.\n"
+                    "- For EXTRACT, set output_name exactly to the output "
+                    "name requested by the goal.\n"
+                    "- Complete required mutations before extraction. "
+                    "If the goal specifies a value for a field and the "
+                    "observation shows that field is empty or has the "
+                    "wrong value, use FILL before using EXTRACT.\n"
+                    "- Never use EXTRACT as a substitute for filling a "
+                    "required field.\n"
+                    "- After a required value has been filled, if the goal "
+                    "asks to extract that field, use EXTRACT on that field.\n"
+                    "- Once all requested interactions and extractions have "
+                    "been performed, use COMPLETE.\n"
                     "- Use WAIT only when the page appears to be loading.\n"
                     "- Use COMPLETE only when the goal has been achieved.\n"
-                    "- Use ESCALATE if you cannot safely determine what to do.\n"
+                    "- Use ESCALATE if you cannot safely determine what "
+                    "to do.\n"
                     "- Never invent an element ID."
                 ),
             },
@@ -78,6 +96,7 @@ def decide_action(
 
     return response.output_parsed
 
+
 if __name__ == "__main__":
     observation = """
 TITLE: ParaBank | Welcome | Online Banking
@@ -90,7 +109,10 @@ INTERACTIVE ELEMENTS:
 """
 
     action = decide_action(
-        goal="Enter the username demo_user into the username field.",
+        goal=(
+            "Enter the username demo_user into the "
+            "username field."
+        ),
         observation=observation,
     )
 
