@@ -1,194 +1,85 @@
 # Computer-Use Automation System — Implementation Report
 
-## Executive summary
+## 1. Architecture
 
-This project implements a complete computer-use automation vertical slice: an LLM drives a real browser during discovery, the successful interaction is converted into a typed and versioned reusable capability artifact, and a separate deterministic replay path executes that artifact with caller-supplied inputs without using an LLM for decisions.
+This project implements a complete computer-use automation vertical slice against the public ParaBank demo site. The central architectural decision is to separate probabilistic **discovery** from deterministic **production replay**.
 
-The demonstration targets the ParaBank Customer Care page. Discovery navigates to Contact Us, fills four form fields, extracts the Message field, and records the successful workflow. Replay loads that artifact, resolves stable semantic targets, performs the actions, returns the declared output, verifies observable success conditions, classifies failures, and supports transfer of the same browser session to a human for recoverable situations.
+During discovery, `app/browser.py` opens a live Playwright browser and `app/agent.py` runs an LLM-driven observe → decide → act loop. `app/surface.py` converts the current browser state into a compact observation containing the URL, title, and interactive controls. The model selects a typed action such as `click`, `fill`, `select`, `extract`, `wait`, `complete`, or `escalate`. Before execution, the action is checked by independent guardrails. Successful actions are recorded as reusable semantic steps rather than as a raw model transcript.
 
-## Requirement mapping
+The demonstrated capability navigates to ParaBank Customer Care, fills Name, Email, Phone, and Message, extracts the Message value, and deliberately does not submit the form. Discovery is bounded by explicit step, attempt, and handoff limits so model-driven execution cannot loop indefinitely.
 
-| Requirement | Implementation |
-| --- | --- |
-| LLM drives a real computer/browser surface | `app/agent.py`, `app/browser.py`, and `app/surface.py` use structured model decisions with a live Playwright browser. |
-| Successful run becomes a reusable artifact | `app/browser.py` records the successful steps and saves `evidence/artifacts/fill_customer_care_form.json`. |
-| Typed/versioned artifact | `app/artifact.py` defines the Pydantic capability schema and artifact version `1.3`. |
-| Ordered actions and stable target identification | Artifact steps contain actions plus semantic `role`/`name` targets. |
-| Typed inputs | Artifact input schema declares `name`, `email`, `phone`, and `message` as required strings. |
-| Typed outputs/data to extract | Artifact output schema declares required string output `message_value`; an `extract` step produces it. |
-| Explicit success/checkpoint conditions | Artifact contains a URL-path checkpoint plus field-value checkpoints tied to invocation parameters. |
-| Deterministic replay without LLM | `app/replay.py` loads and executes the artifact directly; it contains no OpenAI client/API decision loop. |
-| Stable replay targeting | `app/surface.py` resolves normalized semantic role/name targets and rejects missing/ambiguous matches. |
-| Structured result | Replay returns `ReplayResult` with status, outputs, failure category, failed step, reason, expected, and observed fields. |
-| Error/outcome taxonomy | `app/escalation.py` models business outcomes, recoverable automation errors, and hard failures. |
-| Human escalation/control transfer | Discovery and replay support same-session human handoff; replay includes `--demo-handoff-step`. |
-| Safety/guardrails | `app/guardrails.py` enforces domain, route, action, and blocked-target policies. |
-| Evidence | `evidence/` contains the saved artifact, structured logs, and screenshots. |
+After discovery succeeds, `app/artifact.py` serializes the interaction as a typed capability artifact. `app/replay.py` is a separate deterministic executor: it loads the artifact, validates invocation inputs, resolves recorded semantic targets, executes the fixed action sequence, collects declared outputs, verifies checkpoints, and returns a structured result. It does not use an LLM to decide replay actions.
 
-## 1. System lifecycle
+The main trade-off is deliberate simplicity. Playwright and accessibility-style semantic targeting give a strong, inspectable implementation for one real surface without prematurely building distributed scheduling, multi-tenant infrastructure, or a full operator console. The abstraction boundary is the surface adapter: discovery/replay operate on semantic observations and actions, while browser-specific perception and control live in `PlaywrightSurface`.
 
-The implementation deliberately separates **discovery** from **replay**.
+## 2. Artifact schema
 
-During discovery, the system opens the real ParaBank site and observes the interactive surface. The model receives a compact representation of the page and chooses a structured action. The runner validates the action with guardrails, executes it, converts the temporary observation target into a semantic target, and records successful actions. Runtime output state is also supplied back to the discovery loop so the model can recognize when the requested extraction has already occurred and terminate instead of repeatedly extracting the same value.
+The reusable capability is defined with typed Pydantic models and an explicit artifact version (`1.3`). The saved example is `evidence/artifacts/fill_customer_care_form.json`.
 
-After successful completion, the run is serialized as a capability artifact. The artifact is the boundary between the probabilistic discovery phase and deterministic execution.
+The artifact is a contract, not merely a list of clicks. It records the capability name and goal, target domain, version and creation metadata, typed input schema, typed output schema, ordered action steps, semantic targets, input/output references, URL preconditions, and explicit success checkpoints.
 
-During replay, the model is not asked what to do. The runner validates the artifact and invocation inputs, opens the target application, checks each step's URL precondition, resolves the recorded semantic target, applies guardrails, executes the recorded action, collects declared outputs, verifies explicit success checkpoints, and emits a structured result.
+The example capability requires four string inputs: `name`, `email`, `phone`, and `message`. Parameterized fill steps store an `input_ref` rather than the discovery-run value, so replay receives fresh caller-provided values instead of persisting reusable PII in the artifact. It declares one required string output, `message_value`, produced by an `extract` step.
 
-## 2. Discovery design
+Recorded targets use semantic `role` + accessible `name` pairs. Temporary discovery observation IDs are intentionally not persisted as replay identity. The six recorded actions are: navigate through Contact Us, fill the four Customer Care fields, and extract Message.
 
-### Observation
+The artifact declares five success checkpoints: the final URL path must be `/parabank/contact.htm`, and each of the four fields must contain its corresponding invocation value. Keeping outputs and checkpoints separate is intentional: an output is data returned to the caller, while a checkpoint proves that the requested application state was actually reached.
 
-`PlaywrightSurface` converts the current page into an observation containing the title, URL, and interactive elements. Elements include a temporary observation ID together with semantic information such as role, accessible name, tag, and current value.
+The schema is versioned so replay can reject unsupported contracts rather than silently misinterpreting older artifacts. A production implementation would add formal migration tooling, richer locator candidates and confidence metadata, and comprehensive type coercion/validation for every declared primitive type.
 
-The temporary ID is useful for one model decision because it provides a concise way to identify an element in the current observation. It is not treated as a durable replay locator.
+## 3. Determinism & error handling
 
-### Structured model actions
+Replay is intentionally isolated from LLM discovery. Given an artifact and input parameters, `app/replay.py` validates the artifact/version and typed inputs, opens the known target, checks each recorded URL precondition, applies guardrails, resolves the semantic target, executes the recorded action, captures declared outputs, verifies live checkpoints, and returns a structured `ReplayResult`.
 
-The model selects from typed actions such as `click`, `fill`, `select`, `extract`, `wait`, `complete`, and `escalate`. The discovery prompt defines the exact capability goal, including the requirement to fill the four fields, extract the Message value, avoid submitting the form, and complete only when the requested work is finished.
+Determinism comes from replaying executable artifact data rather than asking a model to reinterpret a transcript. Semantic role/name targets are normalized and must resolve uniquely. Zero matches and ambiguous matches are errors rather than opportunities to guess. ParaBank may add an ephemeral `jsessionid` to URLs, so URL normalization removes that session-specific component before route comparisons.
 
-### Bounded autonomy
+The result/error contract separates three categories. A `business_outcome` is a legitimate application result the caller needs to know about, not an automation crash. A `recoverable_error` means deterministic automation cannot safely continue but the situation may be recoverable through intervention, such as a missing/ambiguous semantic target or unexpected checkpoint state. A `hard_failure` represents invalid or unsafe conditions such as unsupported artifact versions, missing/invalid required inputs, blocked guardrail actions, missing artifacts, or infrastructure/configuration failures.
 
-Discovery is bounded by explicit limits on steps, attempts, and handoffs. This prevents an unsuccessful model/browser interaction from looping indefinitely.
+Structured failures include diagnostic context such as category, reason, failed step, expected state, and observed state. `app/error_demo.py` demonstrates all three categories. The selected non-submitting ParaBank happy path does not naturally produce a business rejection, so the business-outcome category is explicitly modeled and demonstrated rather than artificially changing the main workflow solely to manufacture one.
 
-### Runtime output tracking
+Success is not inferred from the absence of exceptions. Replay separately verifies URL and field-value checkpoints against the live surface and requires declared outputs to be produced. This makes failures debuggable and prevents blind progression through an unexpected state.
 
-Extracted values are kept in discovery runtime state. The reusable artifact records that an extraction should occur and which declared output it produces; the reusable action should not depend on a particular discovery-run value.
+## 4. Heterogeneity & multi-tenant
 
-## 3. Capability artifact
+The implementation targets one web application, but the core contract separates **what the flow means** from **how a particular surface is perceived and controlled**. Artifact steps contain abstract action types, semantic targets, parameter references, outputs, and checkpoints. Browser-specific observation and execution are concentrated in the surface adapter.
 
-The artifact is defined using typed Pydantic models and carries an explicit version. The saved example capability is `fill_customer_care_form` at version `1.3`.
+For a legacy web application, a new adapter could build observations from accessibility information, frames, DOM metadata, OCR/vision, or deterministic coordinate anchors while exposing the same semantic action interface to discovery and replay. For a desktop application, the adapter could use OS accessibility APIs or a computer-use/vision layer. The artifact and replay contract would remain largely unchanged; surface-specific locator representations could be added as typed target variants while preserving the same action/input/output/checkpoint model.
 
-Its contract contains four required string inputs:
+For multi-tenant reuse, the capability should be associated with an application/vendor family and a compatible version range rather than with one institution's concrete deployment. Shared steps would remain canonical, while tenant-specific configuration could provide approved route patterns, target aliases/overrides, and environment metadata. Invocation data such as member IDs or form values remains parameterized rather than baked into the artifact.
 
-- `name`
-- `email`
-- `phone`
-- `message`
+Drift should be detected rather than hidden. Replay already fails on route, target, or checkpoint mismatches. At scale, those signals could be aggregated by vendor/version/tenant to distinguish a single-tenant configuration difference from a product-wide UI change. A reviewed override could specialize a canonical artifact for a tenant; a vendor-wide change could produce a new artifact version. Production replay should never silently relearn a changed workflow with an unrestricted LLM because that would weaken deterministic execution and reviewability.
 
-It declares one required string output:
+This design avoids requiring a new recording for every institution while still making tenant-specific differences explicit, reviewable, and bounded by policy.
 
-- `message_value`
+## 5. Escalation & handoff
 
-The recorded workflow contains six ordered actions: navigate through the Contact Us link, fill the four Customer Care fields, then extract the Message field.
+The system has a real same-session human-control seam rather than treating escalation as a TODO. Discovery can escalate when the model is stuck, and deterministic replay can escalate recoverable conditions. The handoff request records the error category/reason, current step, current URL/state context, and last action so an operator has enough information to intervene.
 
-Parameterized fill steps store an `input_ref` such as `name` or `email`. The invocation value is therefore provided by the replay caller rather than being hard-coded into the reusable capability action.
+For deterministic evidence, replay supports `--demo-handoff-step N`. Before the selected recorded step, automation pauses, creates a structured handoff request, captures evidence, and leaves the existing browser session open. The human performs the required action in that same session and signals resume from the terminal. Automation then inspects the resulting live state, records the ownership transition/evidence, and continues from the preserved session.
 
-The artifact also declares five success checkpoints: the final URL path must be `/parabank/contact.htm`, and each of the four form fields must contain its corresponding invocation value.
+The control model is therefore explicit: automation owns the session during normal execution, yields ownership during handoff, waits while the human acts, and reacquires ownership only after the human signals resume. Hard safety failures are not converted into handoff opportunities merely to bypass policy.
 
-## 4. Deterministic replay
+The operator surface is intentionally minimal and terminal-coordinated. A production system would add authenticated operator identity, visible ownership state, timeout/cancel controls, richer screenshots/state context, audit records of manual actions, and explicit resume policies, but the same-session pause/cede/resume mechanism is implemented here.
 
-`app/replay.py` is intentionally separate from the LLM discovery path. Replay behavior is derived from the artifact and supplied inputs rather than fresh model reasoning.
+## 6. Safety
 
-Replay performs the following sequence:
+Safety checks are independent of LLM reasoning. `app/guardrails.py` enforces explicit allowed domains, routes, action types, and blocked targets. The agent cannot authorize itself to leave those boundaries.
 
-1. Load and Pydantic-validate the artifact.
-2. Require the supported artifact version.
-3. Validate supplied inputs against the typed input schema.
-4. Open the known target application.
-5. Before every step, compare the current normalized route with the recorded precondition.
-6. Run the action through guardrails.
-7. Resolve the recorded semantic target.
-8. Execute the action using the invocation value referenced by `input_ref` where applicable.
-9. Capture extraction results by declared output name.
-10. Verify explicit success checkpoints against the live UI.
-11. Return only outputs declared by the artifact output schema.
-12. Print/log a structured replay result.
+The Customer Care submit action is deliberately blocked. The demonstrated capability is "fill and inspect," not "send a customer-care request." Submission would create an external side effect, so keeping it outside the allowed capability makes the safe/reversible versus risky/irreversible boundary concrete. Guardrail violations are hard failures; human handoff is not a mechanism for bypassing them.
 
-This separation is important: the artifact is not merely a transcript for another model prompt. It is executable data for a deterministic engine.
+Reusable artifacts parameterize runtime values with `input_ref` instead of persisting discovery-run form values. Logs/actions are designed around structured metadata rather than secrets. The demo uses synthetic values and no real banking credentials or PII.
 
-## 5. Locator strategy
+The current implementation is a demonstration rather than a production financial-data system. Production use would require centralized secret management, systematic configurable redaction across logs/screenshots/traces, stricter PII classification, retention controls, authenticated operators, audit policy, and broader security testing. These limits are intentional and documented rather than implied to be solved by the demo.
 
-The locator strategy distinguishes **discovery identity** from **replay identity**.
+## 7. Cuts
 
-Observation IDs are ephemeral. Once an action succeeds during discovery, the system records a semantic target containing the element's role and accessible name. Replay resolves that pair against the current live surface using normalized text.
+The project prioritizes a small, complete vertical slice over breadth. It deliberately leaves out a full operator web console, desktop/OS automation adapters, multi-tenant infrastructure, automatic artifact migrations, a multi-strategy locator graph, broad automated integration testing, and production-grade secret/redaction infrastructure.
 
-A target must resolve uniquely. Zero matches and multiple matches are explicit recoverable errors. This is safer than silently choosing the first approximate element and also makes UI drift visible in evidence.
+The semantic locator currently uses role + accessible name rather than recording several fallback strategies. This is substantially more stable than replaying temporary observation IDs and exposes drift cleanly, but production artifacts should include deterministic fallback candidates plus uniqueness/confidence metadata.
 
-ParaBank may introduce an ephemeral `jsessionid` into the URL. URL normalization strips that session-specific component before deterministic route comparisons so replay does not mistake a new session identifier for application drift.
+The business-outcome type is implemented and demonstrated, but the selected ParaBank flow intentionally stops before submission and therefore does not naturally exercise a business rejection. A broader fixture/test suite would add a real alternate business result without weakening the safety boundary of this capability.
 
-## 6. Outputs and success conditions
+The handoff UI is terminal-based. This keeps the control-transfer mechanism real while avoiding time spent on an operator-console frontend that is outside the core evaluation. Production would add authentication, cancellation/timeouts, explicit operator ownership, and richer auditing.
 
-Outputs are part of the capability contract rather than incidental print statements. The example artifact declares `message_value`, and the final recorded `extract` action maps the Message textbox to that output name.
+With more time, the next work would be: artifact migration/compatibility tests; deterministic multi-locator fallback rules; comprehensive typed output validation; controlled replay fixtures and CI; richer business-outcome detectors; configurable sensitive-data redaction and secret storage; a dedicated operator UI; and vendor/tenant compatibility metadata with reviewed overrides.
 
-Replay collects extraction results during execution and returns only outputs declared by the artifact. A required output that was not produced is a hard failure because the capability contract was not fulfilled.
-
-Success is separately verified through observable checkpoints. This prevents the system from equating "the automation command did not throw" with "the requested state exists in the application." Field checkpoints read the current UI values and compare them with invocation inputs.
-
-## 7. Error taxonomy
-
-The project uses three explicit categories.
-
-### Business outcome
-
-A `business_outcome` represents a legitimate application result that is meaningful to the caller but is not an automation-system defect. The type is modeled and demonstrated even though the selected ParaBank happy path does not naturally produce a business rejection/outcome.
-
-### Recoverable automation error
-
-A `recoverable_error` means deterministic automation cannot safely continue on its own but the situation may be recoverable with human intervention. Examples include a missing/ambiguous semantic target, changed route precondition, or a checkpoint state that does not match expectations.
-
-### Hard failure
-
-A `hard_failure` covers unsafe or invalid conditions such as an unsupported artifact version, invalid/missing required input, missing artifact, blocked guardrail action, or infrastructure/configuration failure. Hard failures are not converted into handoff opportunities merely to continue execution, because doing so could bypass the safety contract.
-
-`app/error_demo.py` provides a compact demonstration of the taxonomy.
-
-## 8. Human control transfer
-
-Human handoff preserves the existing browser session. The automation does not close the browser and ask the operator to reproduce the state elsewhere.
-
-For evidence, deterministic replay supports `--demo-handoff-step N`. Before that recorded step, the runner creates a structured handoff request, captures a screenshot, transfers ownership to the human, prints a precise instruction, and waits. The operator performs the step in the same browser and presses Enter. Automation captures the post-handoff state, verifies relevant observable state for fill steps, logs the ownership transition, and resumes.
-
-This demonstrates explicit control transfer rather than treating "human escalation" as only an error message.
-
-## 9. Safety model
-
-Guardrails are checked independently of model reasoning. The demo constrains automation to ParaBank, approved routes, and approved action types. It explicitly blocks the Customer Care submission target.
-
-That blocked submission is intentional. The demonstrated capability is "fill and inspect" rather than "send a customer-care request." Keeping submission out of scope reduces external side effects and makes the safety boundary easy to inspect.
-
-Guardrail violations are hard failures. A human handoff is not offered as a mechanism for bypassing the blocked action.
-
-## 10. Evidence and observability
-
-The project writes structured JSONL logs through `RunLogger` and saves browser screenshots for discovery, replay, and handoff evidence. The repository includes the saved capability artifact so the reviewer can inspect the exact serialized contract independently of the Python implementation.
-
-Important evidence locations are:
-
-- `evidence/artifacts/`
-- `evidence/logs/`
-- `evidence/screenshots/`
-- `evidence/replay/`
-
-The replay result itself is structured and includes success/failure status, declared outputs, and diagnostic fields for failures.
-
-## 11. Tradeoffs and limitations
-
-This implementation prioritizes a complete and inspectable vertical slice over broad product coverage.
-
-The semantic locator uses role and accessible name rather than a multi-strategy locator graph. This is stable enough for the demonstration and much better than replaying temporary IDs, but a production system would record multiple candidate locator strategies and confidence/uniqueness metadata.
-
-The artifact schema supports multiple primitive value types, while the current demonstration inputs and output are strings. Production replay should add comprehensive output type coercion and validation for every declared type.
-
-The current handoff UI is terminal-coordinated. A production system would expose ownership state in a dedicated operator interface and support timeouts, cancellation, authentication, and richer resume policies.
-
-The business-outcome category is explicit in the architecture but is not naturally exercised by the selected non-submitting ParaBank workflow. A broader test suite would include a workflow with a genuine business rejection or alternate successful outcome.
-
-Finally, production use would require stronger secret management and configurable log redaction, automated unit/integration tests, artifact migration tooling, concurrency/session isolation, and broader browser/application support.
-
-## 12. Future improvements
-
-The next improvements would be:
-
-1. record multiple semantic/DOM locator candidates with deterministic fallback rules;
-2. add artifact migration and compatibility tests across versions;
-3. validate/coerce all output types against the output schema;
-4. add automated replay tests using controlled fixtures;
-5. add richer business-outcome detectors;
-6. add configurable sensitive-value redaction and secret storage;
-7. add an operator UI for handoff/resume; and
-8. add CI that compiles the project and runs non-browser contract tests.
-
-## Conclusion
-
-The project demonstrates the requested core transition from probabilistic computer-use discovery to deterministic reusable automation. The successful browser interaction becomes a typed/versioned artifact with explicit inputs, outputs, semantic targets, and checkpoints. Replay consumes that artifact without an LLM decision loop, reports structured outcomes, detects drift instead of guessing, applies safety guardrails, and can transfer the same live session to a human for recoverable situations.
+The resulting system demonstrates the required through-line: a genuine LLM-driven interaction with a live surface becomes a typed/versioned capability, that capability replays deterministically with caller inputs and declared outputs, runtime failures are classified deliberately, safety policy remains independent of the model, and a human can take control of the same live session when recovery is appropriate.
