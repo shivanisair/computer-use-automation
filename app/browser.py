@@ -1,6 +1,8 @@
 import argparse
 from pathlib import Path
+
 from playwright.sync_api import sync_playwright
+
 from app.agent import ActionType, AgentAction, decide_action
 from app.artifact import (
     CapabilityArtifact,
@@ -19,6 +21,8 @@ from app.surface import Observation, PlaywrightSurface
 
 TARGET_URL = "https://parabank.parasoft.com/parabank/index.htm"
 MAX_STEPS = 8
+MAX_ATTEMPTS = 16
+MAX_HANDOFFS = 2
 
 
 def get_semantic_target(
@@ -315,6 +319,7 @@ capability_goal = (
     "Complete when all four fields have been filled."
 )
 
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Run LLM-driven capability discovery."
@@ -351,8 +356,10 @@ def parse_args():
 
     return parser.parse_args()
 
+
 def main():
     args = parse_args()
+
     evidence_dir = Path("evidence")
     screenshot_dir = evidence_dir / "screenshots"
     artifact_dir = evidence_dir / "artifacts"
@@ -497,9 +504,9 @@ def main():
         print(f"Opening: {target_url}")
 
         page.goto(
-        target_url,
-        wait_until="domcontentloaded",
-        timeout=30_000,
+            target_url,
+            wait_until="domcontentloaded",
+            timeout=30_000,
         )
 
         surface = PlaywrightSurface(page)
@@ -534,6 +541,8 @@ def main():
                 "capability_name": artifact.capability_name,
                 "target_url": target_url,
                 "max_steps": MAX_STEPS,
+                "max_attempts": MAX_ATTEMPTS,
+                "max_handoffs": MAX_HANDOFFS,
             },
         )
 
@@ -549,8 +558,32 @@ def main():
         demo_handoff_used = False
 
         step_number = 1
+        attempt_count = 0
+        handoff_count = 0
+        stop_reason = None
 
         while step_number <= MAX_STEPS:
+            attempt_count += 1
+
+            if attempt_count > MAX_ATTEMPTS:
+                stop_reason = (
+                    f"Discovery exceeded the maximum attempt limit "
+                    f"of {MAX_ATTEMPTS} without completing the goal."
+                )
+
+                logger.log(
+                    "attempt_limit_reached",
+                    step_number=step_number,
+                    data={
+                        "attempt_count": attempt_count,
+                        "max_attempts": MAX_ATTEMPTS,
+                        "reason": stop_reason,
+                    },
+                )
+
+                print(f"\nSTOPPING: {stop_reason}")
+                break
+
             print("\n" + "=" * 70)
             print(
                 f"DISCOVERY STEP {step_number}"
@@ -646,6 +679,27 @@ def main():
                 break
 
             if action.action == ActionType.ESCALATE:
+                handoff_count += 1
+
+                if handoff_count > MAX_HANDOFFS:
+                    stop_reason = (
+                        f"Discovery exceeded the maximum human handoff "
+                        f"limit of {MAX_HANDOFFS}."
+                    )
+
+                    logger.log(
+                        "handoff_limit_reached",
+                        step_number=step_number,
+                        data={
+                            "handoff_count": handoff_count,
+                            "max_handoffs": MAX_HANDOFFS,
+                            "reason": stop_reason,
+                        },
+                    )
+
+                    print(f"\nSTOPPING: {stop_reason}")
+                    break
+
                 perform_discovery_handoff(
                     page=page,
                     logger=logger,
@@ -663,8 +717,8 @@ def main():
                     },
                 )
 
-                # Do not increment the step. Re-observe the same live
-                # browser state and let the LLM decide what comes next.
+                # Do not increment the capability step.
+                # Re-observe the same live browser after human recovery.
                 continue
 
             # Resolve the temporary numeric ID into semantic
@@ -764,6 +818,27 @@ def main():
                     },
                 )
 
+                handoff_count += 1
+
+                if handoff_count > MAX_HANDOFFS:
+                    stop_reason = (
+                        f"Discovery exceeded the maximum human handoff "
+                        f"limit of {MAX_HANDOFFS}."
+                    )
+
+                    logger.log(
+                        "handoff_limit_reached",
+                        step_number=step_number,
+                        data={
+                            "handoff_count": handoff_count,
+                            "max_handoffs": MAX_HANDOFFS,
+                            "reason": stop_reason,
+                        },
+                    )
+
+                    print(f"\nSTOPPING: {stop_reason}")
+                    break
+
                 perform_discovery_handoff(
                     page=page,
                     logger=logger,
@@ -781,8 +856,8 @@ def main():
                     },
                 )
 
-                # The failed action is NOT recorded in the artifact.
-                # Re-observe the live UI after the human recovery.
+                # The failed action is not recorded in the artifact.
+                # Re-observe after the human recovery.
                 continue
 
             input_ref = get_input_ref(
@@ -841,7 +916,7 @@ def main():
 
         else:
             if not hard_failure:
-                reason = (
+                reason = stop_reason or (
                     f"Discovery reached the maximum "
                     f"step limit of {MAX_STEPS} "
                     "without completing the goal."
@@ -850,14 +925,14 @@ def main():
                 handoff = create_handoff(
                     category=ErrorCategory.RECOVERABLE_ERROR,
                     reason=reason,
-                    step_number=MAX_STEPS,
+                    step_number=step_number,
                     current_url=page.url,
                     last_action=None,
                 )
 
                 logger.log(
                     "human_handoff",
-                    step_number=MAX_STEPS,
+                    step_number=step_number,
                     data={
                         "category": (
                             ErrorCategory
